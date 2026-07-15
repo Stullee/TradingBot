@@ -3,6 +3,25 @@ name = "tradingbot"
 version = "0.1.0"
 description = "Automated intraday day-trading bot for Interactive Brokers (TWS/IB Gateway)"
 requires-python = ">=3.11"
+dependencies = [
+    "ib_async>=1.0.3",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "pytz>=2024.1",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

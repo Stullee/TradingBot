@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     flatten_before_close_min: int = 5
 
     log_level: str = "INFO"
+    log_dir: str = "logs"
 
     @field_validator("symbols")
     @classmethod

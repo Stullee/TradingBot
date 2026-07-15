@@ -9,6 +9,11 @@ warranty, and is not financial advice. Test extensively on a **paper trading**
 account before ever pointing it at a live account. You are solely responsible
 for any losses.
 
+**Running this on Home Assistant OS?** See [`DEPLOY.md`](DEPLOY.md) — it
+ships as a proper Home Assistant add-on (`ha-addons/tradingbot`), configured
+through the HA UI instead of a `.env` file. This top-level README covers
+running it directly (plain Python / your own server).
+
 ## What it does
 
 - Connects to TWS/IB Gateway and streams live intraday bars for a configurable

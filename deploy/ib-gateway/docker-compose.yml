@@ -1,0 +1,27 @@
+# IB Gateway, run exactly as its maintainers (gnzsnz/ib-gateway-docker)
+# intend -- we don't wrap or modify their image, just configure it via env vars.
+#
+# network_mode: host means the container shares the host machine's network
+# stack directly: IB Gateway's API then listens on the host's own
+# 127.0.0.1:4002 (paper) / 127.0.0.1:4001 (live) -- reachable only from
+# processes on this same machine, never exposed to the rest of your LAN.
+# This is the recommended setup: colocate this with the TradingBot add-on
+# (also configured with host networking) on the same Home Assistant host.
+#
+# See ../../DEPLOY.md for the full setup walkthrough.
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      READ_ONLY_API: ${READ_ONLY_API:-no}
+      TIME_ZONE: ${TIME_ZONE:-America/New_York}
+      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
+      AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-}
+      # Set this to enable a VNC server (useful the first few times, to watch
+      # the login/2FA flow). Leave empty to disable it.
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}

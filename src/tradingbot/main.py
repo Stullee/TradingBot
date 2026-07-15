@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 async def _amain() -> None:
     settings = load_settings()
-    setup_logging(settings.log_level)
+    setup_logging(settings.log_level, settings.log_dir)
 
     log.info(
         "Starting TradingBot | mode=%s | symbols=%s",

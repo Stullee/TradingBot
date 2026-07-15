@@ -32,23 +32,28 @@ class BrokerConnection:
             self.ib.reqAccountUpdates(True, s.ib_account_id)
         log.info("Connected. Server version=%s", self.ib.client.serverVersion())
 
+    async def connect_with_retry(self, max_delay: int = 60) -> None:
+        """Like connect(), but keeps retrying with backoff instead of raising --
+        used for the initial connection too, so the bot can be started before
+        IB Gateway/TWS is up and running (e.g. account still being set up,
+        IB Gateway mid-restart) and it'll just wait instead of crashing."""
+        delay = 5
+        while not self._closing:
+            try:
+                await self.connect()
+                return
+            except Exception as exc:  # noqa: BLE001 - keep retrying on any connection error
+                log.warning(
+                    "Could not connect to IB (%s). Retrying in %ss...", exc, delay
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, max_delay)
+
     def _on_disconnected(self) -> None:
         if self._closing:
             return
         log.warning("Lost connection to IB. Will attempt to reconnect...")
-        asyncio.ensure_future(self._reconnect_loop())
-
-    async def _reconnect_loop(self) -> None:
-        delay = 5
-        while not self._closing and not self.ib.isConnected():
-            try:
-                await self.connect()
-                log.info("Reconnected to IB.")
-                return
-            except Exception as exc:  # noqa: BLE001 - keep retrying on any connection error
-                log.error("Reconnect attempt failed: %s. Retrying in %ss.", exc, delay)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 60)
+        asyncio.ensure_future(self.connect_with_retry())
 
     async def qualify_stock(self, symbol: str, exchange: str = "SMART", currency: str = "USD") -> Contract:
         contract = Stock(symbol, exchange, currency)

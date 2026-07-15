@@ -54,7 +54,7 @@ class TradingEngine:
         self._flattened_for_day = False
 
     async def start(self) -> None:
-        await self.broker.connect()
+        await self.broker.connect_with_retry()
         self.bars = BarStream(self.broker.ib, self.settings.bar_size)
         self.orders = OrderManager(self.broker.ib)
 

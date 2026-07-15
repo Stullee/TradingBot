@@ -17,19 +17,31 @@ class BarStream:
         self.bar_size = bar_size
         self._bar_lists: dict[str, object] = {}
 
-    async def subscribe(self, symbol: str, contract: Contract) -> None:
+    async def subscribe(
+        self,
+        symbol: str,
+        contract: Contract,
+        use_rth: bool = True,
+        what_to_show: str = "TRADES",
+    ) -> None:
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
             durationStr="1 D",
             barSizeSetting=self.bar_size,
-            whatToShow="TRADES",
-            useRTH=True,
+            whatToShow=what_to_show,
+            useRTH=use_rth,
             formatDate=2,
             keepUpToDate=True,
         )
         self._bar_lists[symbol] = bars
-        log.info("Subscribed to live %s bars for %s", self.bar_size, symbol)
+        log.info(
+            "Subscribed to live %s bars for %s (useRTH=%s, whatToShow=%s)",
+            self.bar_size,
+            symbol,
+            use_rth,
+            what_to_show,
+        )
 
     def dataframe(self, symbol: str) -> pd.DataFrame | None:
         bars = self._bar_lists.get(symbol)

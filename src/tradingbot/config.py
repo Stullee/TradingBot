@@ -1,8 +1,10 @@
 """Typed application configuration loaded from environment / .env file."""
 from __future__ import annotations
 
-from pydantic import field_validator, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from tradingbot.symbols import SymbolSpec, parse_markets_dsl, symbols_to_markets_dsl
 
 LIVE_TRADING_PORTS = {7496, 4001}
 PAPER_TRADING_PORTS = {7497, 4002}
@@ -20,6 +22,10 @@ class Settings(BaseSettings):
 
     # Universe
     symbols: str = "AAPL,MSFT,NVDA"
+    # Multi-market DSL, e.g. "US:AAPL,MSFT;EU:SAP.DE;ASIA:0700.HK;CRYPTO:BTC,ETH".
+    # Takes priority over `symbols` when set; see tradingbot.symbols for the
+    # exact format. Leave empty to keep using `symbols` (all assigned to US).
+    markets: str = ""
 
     # Strategy
     bar_size: str = "5 mins"
@@ -41,9 +47,10 @@ class Settings(BaseSettings):
     max_concurrent_positions: int = 3
     max_position_pct: float = 20.0
 
-    # Trading hours (US/Eastern, "HH:MM")
-    market_open: str = "09:30"
-    market_close: str = "16:00"
+    # Trading hours: each market's own session times come from the built-in
+    # presets in tradingbot.markets (not configurable here, to keep the
+    # option surface manageable -- edit that file for a different exchange).
+    # These buffer minutes apply the same way to every market's own close.
     no_new_entries_before_close_min: int = 15
     flatten_before_close_min: int = 5
 
@@ -59,12 +66,18 @@ class Settings(BaseSettings):
     news_poll_interval_sec: int = 300
     news_max_hold_min: int = 240
 
-    @field_validator("symbols")
-    @classmethod
-    def _symbols_not_empty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("SYMBOLS must contain at least one ticker")
-        return v
+    @model_validator(mode="after")
+    def _guard_universe_not_empty(self) -> "Settings":
+        if not self.markets.strip() and not self.symbols.strip():
+            raise ValueError("Either SYMBOLS or MARKETS must contain at least one ticker")
+        return self
+
+    @model_validator(mode="after")
+    def _guard_markets_dsl(self) -> "Settings":
+        # Parses eagerly so a malformed MARKETS/SYMBOLS value fails fast at
+        # startup instead of deep inside the engine.
+        self.symbol_specs  # noqa: B018 - property access is the validation
+        return self
 
     @model_validator(mode="after")
     def _guard_live_trading(self) -> "Settings":
@@ -86,8 +99,13 @@ class Settings(BaseSettings):
         return self
 
     @property
+    def symbol_specs(self) -> list[SymbolSpec]:
+        dsl = self.markets.strip() or symbols_to_markets_dsl(self.symbols)
+        return parse_markets_dsl(dsl)
+
+    @property
     def symbol_list(self) -> list[str]:
-        return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+        return [spec.symbol for spec in self.symbol_specs]
 
     @property
     def is_paper(self) -> bool:

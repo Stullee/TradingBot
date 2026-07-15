@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from ib_async import IB, Stock, Contract
+from ib_async import IB, Contract, Crypto, Stock
 
 from tradingbot.config import Settings
 
@@ -55,8 +55,13 @@ class BrokerConnection:
         log.warning("Lost connection to IB. Will attempt to reconnect...")
         asyncio.ensure_future(self.connect_with_retry())
 
-    async def qualify_stock(self, symbol: str, exchange: str = "SMART", currency: str = "USD") -> Contract:
-        contract = Stock(symbol, exchange, currency)
+    async def qualify_contract(
+        self, security_type: str, symbol: str, exchange: str, currency: str
+    ) -> Contract:
+        if security_type == "CRYPTO":
+            contract: Contract = Crypto(symbol, exchange, currency)
+        else:
+            contract = Stock(symbol, exchange, currency)
         [qualified] = await self.ib.qualifyContractsAsync(contract)
         return qualified
 
@@ -66,6 +71,13 @@ class BrokerConnection:
             if v.tag == "NetLiquidation" and (not account or v.account == account):
                 return float(v.value)
         raise RuntimeError("NetLiquidation value not available yet from IB account updates")
+
+    def account_base_currency(self) -> str:
+        account = self.settings.ib_account_id or ""
+        for v in self.ib.accountValues(account):
+            if v.tag == "NetLiquidation" and (not account or v.account == account):
+                return v.currency or "USD"
+        return "USD"
 
     def disconnect(self) -> None:
         self._closing = True

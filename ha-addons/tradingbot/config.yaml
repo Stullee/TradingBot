@@ -1,12 +1,13 @@
 ---
 name: TradingBot (IB Day Trading)
-version: "0.2.0"
+version: "0.3.0"
 slug: tradingbot
 description: >-
-  Automated intraday day-trading bot for Interactive Brokers. EMA/RSI/VWAP
-  momentum strategy, ATR-based bracket orders, daily loss kill switch,
-  end-of-day auto-flatten. Requires a separately running IB Gateway (see
-  DOCS.md) - this add-on only contains the trading logic.
+  Automated day-trading bot for Interactive Brokers across US/EU/Asia stocks
+  and crypto. EMA/RSI/VWAP momentum strategy, ATR-based bracket orders,
+  FX-aware position sizing, daily loss kill switch, per-market auto-flatten.
+  Requires a separately running IB Gateway (see DOCS.md) - this add-on only
+  contains the trading logic.
 url: https://github.com/Stullee/TradingBot
 arch:
   - amd64
@@ -21,6 +22,7 @@ options:
   ib_account_id: ""
   allow_live_trading: false
   symbols: "AAPL,MSFT,NVDA"
+  markets: ""
   bar_size: "5 mins"
   ema_fast: 9
   ema_slow: 21
@@ -37,8 +39,6 @@ options:
   max_daily_loss_pct: 2.0
   max_concurrent_positions: 3
   max_position_pct: 20
-  market_open: "09:30"
-  market_close: "16:00"
   no_new_entries_before_close_min: 15
   flatten_before_close_min: 5
   log_level: "info"
@@ -56,6 +56,7 @@ schema:
   ib_account_id: str
   allow_live_trading: bool
   symbols: str
+  markets: str
   bar_size: str
   ema_fast: int(2,200)
   ema_slow: int(2,200)
@@ -72,8 +73,6 @@ schema:
   max_daily_loss_pct: float(0.1,50)
   max_concurrent_positions: int(1,20)
   max_position_pct: float(1,100)
-  market_open: match(^([01]\d|2[0-3]):[0-5]\d$)
-  market_close: match(^([01]\d|2[0-3]):[0-5]\d$)
   no_new_entries_before_close_min: int(0,120)
   flatten_before_close_min: int(0,60)
   log_level: list(debug|info|warning|error)

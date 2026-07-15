@@ -30,7 +30,8 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `ib_client_id` | TWS API client id (must be unique per connected client) |
 | `ib_account_id` | Optional; leave empty to use whichever account is active |
 | `allow_live_trading` | Must be `true` to connect to a live-trading port |
-| `symbols` | Comma-separated tickers to trade, e.g. `AAPL,MSFT,NVDA` |
+| `symbols` | Simple case: comma-separated US tickers, e.g. `AAPL,MSFT,NVDA` |
+| `markets` | Multi-market DSL, takes priority over `symbols` when set — see below |
 | `bar_size` | IB bar size string, e.g. `5 mins` |
 | `ema_fast` / `ema_slow` | EMA crossover periods |
 | `rsi_period`, `rsi_long_min/max`, `rsi_short_min/max` | RSI entry filter bands |
@@ -40,9 +41,8 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `max_daily_loss_pct` | Daily loss kill switch threshold |
 | `max_concurrent_positions` | Max number of simultaneous open positions |
 | `max_position_pct` | Max % of equity allocated to a single position's notional |
-| `market_open` / `market_close` | Regular trading hours, US/Eastern, `HH:MM` |
-| `no_new_entries_before_close_min` | Stop opening new trades this many minutes before close |
-| `flatten_before_close_min` | Force-close all positions this many minutes before close |
+| `no_new_entries_before_close_min` | Stop opening new trades this many minutes before a market's close |
+| `flatten_before_close_min` | Force-close a market's positions this many minutes before its close |
 | `log_level` | `debug`, `info`, `warning`, or `error` |
 | `enable_news_monitor` | Enable news sentiment shadow-trading (see below). Disabled by default |
 | `finnhub_api_key` | API key from [finnhub.io](https://finnhub.io) (free tier available) |
@@ -51,6 +51,48 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `news_confidence_threshold` | Minimum model confidence (0-1) required to open a shadow trade |
 | `news_poll_interval_sec` | How often to actually poll for new articles |
 | `news_max_hold_min` | Force-close a shadow trade after this long if neither stop nor target hit |
+
+## Multi-market trading (US / EU / Asia / crypto)
+
+Set `markets` (instead of `symbols`) to trade across more than just US stocks
+and extend trading-hours coverage. Format:
+
+```
+MARKET:sym1,sym2,sym3@EXCHANGE@CURRENCY;MARKET2:sym4,...
+```
+
+Example: `US:AAPL,MSFT,NVDA;EU:SAP.DE,ASML.AS@AEB@EUR;ASIA:0700.HK;CRYPTO:BTC,ETH`
+
+Built-in markets (fixed presets — see the repo's `src/tradingbot/markets.py`
+to change exchange/currency/session defaults):
+
+| Market | Default exchange/currency | Session |
+|---|---|---|
+| `US` | SMART / USD | ~4:00–20:00 ET (includes pre/post-market) |
+| `EU` | IBIS (Xetra) / EUR | 9:00–17:30 CET |
+| `ASIA` | SEHK (Hong Kong) / HKD | 9:30–16:00 HKT |
+| `CRYPTO` | PAXOS / USD | 24/7, with a daily 23:55 UTC flatten checkpoint |
+
+Override a symbol's exchange/currency with `SYMBOL@EXCHANGE@CURRENCY`, e.g.
+`VOD.L@LSE@GBP` for a London-listed stock inside the `EU` market group.
+
+**No true zero-downtime:** even using all four, every stock exchange still
+closes on weekends and there's a gap between the US close and Asia's next
+open. Only crypto trades continuously.
+
+**Costs and requirements:**
+- Non-US market data (EU, Asia) typically needs a separate IB market data
+  subscription (billed monthly by IB) beyond the default US entitlements.
+- Crypto trading requires IB crypto trading permissions enabled on your
+  account.
+- Position sizing across currencies uses a live FX rate fetched from IB to
+  convert your account's base-currency risk budget into each symbol's local
+  currency — this needs IB market data access to the relevant FX pair.
+- US extended-hours trading has materially thinner liquidity/wider spreads
+  than the regular session — expect worse fills.
+- Hong Kong's midday trading halt (~12:00–13:00 HKT) isn't modeled; the bot
+  will attempt to trade through it, though orders simply won't fill until
+  the exchange resumes.
 
 ## News sentiment shadow-trading
 

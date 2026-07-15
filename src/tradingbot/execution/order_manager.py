@@ -21,8 +21,11 @@ class OrderManager:
         quantity: int,
         stop_price: float,
         target_price: float,
+        outside_rth: bool = False,
     ) -> Trade:
-        """action: 'BUY' to go long, 'SELL' to go short. Returns the parent Trade."""
+        """action: 'BUY' to go long, 'SELL' to go short. Returns the parent Trade.
+        outside_rth must be True for the order to be eligible to trigger/fill
+        outside a market's regular trading hours (e.g. US pre/post-market)."""
         if quantity <= 0:
             raise ValueError("quantity must be positive")
 
@@ -30,12 +33,15 @@ class OrderManager:
 
         parent = MarketOrder(action, quantity)
         parent.transmit = False
+        parent.outsideRth = outside_rth
 
         take_profit = LimitOrder(exit_action, quantity, round(target_price, 2))
         take_profit.transmit = False
+        take_profit.outsideRth = outside_rth
 
         stop_loss = StopOrder(exit_action, quantity, round(stop_price, 2))
         stop_loss.transmit = True
+        stop_loss.outsideRth = outside_rth
 
         parent_trade = self.ib.placeOrder(contract, parent)
         parent.orderId = parent_trade.order.orderId
@@ -72,10 +78,19 @@ class OrderManager:
         return trade
 
     def flatten_all(self) -> None:
-        positions = [p for p in self.ib.positions() if p.position != 0]
+        self._flatten_matching(lambda p: True, log_label="Flatten-all")
+
+    def flatten_contracts(self, contracts: list[Contract]) -> None:
+        """Flatten only positions in the given contracts (used for per-market
+        end-of-session flattening, leaving other markets' positions alone)."""
+        con_ids = {c.conId for c in contracts}
+        self._flatten_matching(lambda p: p.contract.conId in con_ids, log_label="Flatten")
+
+    def _flatten_matching(self, predicate, log_label: str) -> None:
+        positions = [p for p in self.ib.positions() if p.position != 0 and predicate(p)]
         if not positions:
-            log.info("Flatten-all: no open positions.")
+            log.info("%s: no open positions.", log_label)
             return
-        log.warning("Flatten-all triggered: closing %d open position(s).", len(positions))
+        log.warning("%s triggered: closing %d open position(s).", log_label, len(positions))
         for p in positions:
             self.flatten_position(p.contract, p.position)

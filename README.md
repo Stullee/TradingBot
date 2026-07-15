@@ -1,7 +1,9 @@
 # TradingBot
 
-Automated intraday day-trading bot for Interactive Brokers, driven through
-TWS or IB Gateway's API (via [`ib_async`](https://github.com/ib-api-reloaded/ib_async)).
+Automated day-trading bot for Interactive Brokers, driven through TWS or IB
+Gateway's API (via [`ib_async`](https://github.com/ib-api-reloaded/ib_async)).
+Trades US, EU, and Asia stocks plus crypto to extend trading-hours coverage
+across a single day.
 
 **⚠️ Financial risk disclaimer:** this software places real orders that can
 lose real money. It is provided for educational purposes, comes with no
@@ -16,22 +18,27 @@ running it directly (plain Python / your own server).
 
 ## What it does
 
-- Connects to TWS/IB Gateway and streams live intraday bars for a configurable
-  list of stock tickers.
+- Connects to TWS/IB Gateway and streams live bars for a configurable list of
+  symbols across **US, EU, and Asia stocks plus crypto** (see "Multi-market
+  trading" below) — each market keeps its own session/hours independently.
 - Runs an EMA-crossover momentum strategy (filtered by RSI and session VWAP)
   to generate long/short entry signals.
 - Sizes every position from your account equity and an ATR-based stop
-  distance, so every trade risks a fixed, configurable % of the account.
+  distance, converted through a live FX rate for foreign-currency symbols,
+  so every trade risks a fixed, configurable % of the account regardless of
+  which market it's in.
 - Every entry is a **bracket order**: a market entry with an attached
   stop-loss and take-profit — no naked/unprotected positions are ever opened.
-- Enforces a hard **daily loss limit** (kill switch): once breached, no new
-  trades are opened and all open positions are flattened.
-- Enforces a max number of concurrent positions and a max notional per
-  position.
-- **Never holds positions overnight**: stops opening new trades a
-  configurable number of minutes before the close, and force-flattens
-  everything shortly before the close — this is a day-trading bot, not a
-  swing-trading bot.
+- Enforces a hard **daily loss limit** (kill switch, across all markets):
+  once breached, no new trades are opened and everything is flattened.
+- Enforces a max number of concurrent positions (global, across all markets)
+  and a max notional per position.
+- **Never holds positions past a market's own session**: stops opening new
+  trades a configurable number of minutes before that market's close, and
+  force-flattens that market's positions shortly before it closes — this is
+  a day-trading bot, not a swing-trading bot. Crypto (which never technically
+  closes) still gets a daily synthetic flatten checkpoint for the same
+  bounded-risk discipline.
 - Defaults to Interactive Brokers' **paper trading** port and refuses to
   start against a live port unless you explicitly opt in.
 - **Optional news sentiment shadow-trading** (`ENABLE_NEWS_MONITOR=true`):
@@ -44,22 +51,64 @@ running it directly (plain Python / your own server).
 ```
 src/tradingbot/
   config.py            typed settings loaded from .env
-  market_hours.py       US/Eastern trading-hours helpers
-  broker/connection.py  IB connect/reconnect + contract qualification
+  market_hours.py       generic timezone-aware session helper (MarketSession)
+  markets.py             built-in market presets: US/EU/ASIA/CRYPTO
+  symbols.py              MARKETS config DSL parser -> per-symbol specs
+  fx.py                   live currency conversion via IB forex quotes
+  broker/connection.py  IB connect/reconnect + multi-asset contract qualification
   data/bars.py           live streaming historical bars per symbol
   data/indicators.py     EMA / RSI / ATR / session VWAP (pure pandas, no IB dependency)
   strategy/               pluggable Strategy interface + EmaRsiVwapMomentum
   risk/manager.py         position sizing + daily loss kill switch
-  execution/order_manager.py  bracket orders + flatten-all
+  execution/order_manager.py  bracket orders + per-market/global flatten
   news/                   news sentiment shadow-trading (see below)
-  engine.py               orchestrates the whole loop
+  engine.py               orchestrates the whole loop, per market
   main.py                 entry point
 ```
 
-`data/indicators.py`, `strategy/`, `risk/manager.py`, and `market_hours.py`
-have no dependency on `ib_async` and are fully unit tested (see `tests/`).
-Swap in a different `Strategy` implementation (same interface) to change the
-trading logic without touching connection, risk or execution code.
+`data/indicators.py`, `strategy/`, `risk/manager.py`, `market_hours.py`,
+`markets.py`, and `symbols.py` have no dependency on `ib_async` and are
+fully unit tested (see `tests/`). Swap in a different `Strategy`
+implementation (same interface) to change the trading logic without
+touching connection, risk or execution code.
+
+## Multi-market trading (US / EU / Asia / crypto)
+
+Set `MARKETS` (instead of `SYMBOLS`) in `.env` to trade across more than
+just US stocks:
+
+```
+MARKETS=US:AAPL,MSFT,NVDA;EU:SAP.DE,ASML.AS@AEB@EUR;ASIA:0700.HK;CRYPTO:BTC,ETH
+```
+
+Format: `MARKET:sym1,sym2,sym3@EXCHANGE@CURRENCY;MARKET2:sym4,...` — a bare
+symbol uses that market's default exchange/currency; append
+`@EXCHANGE@CURRENCY` to override (e.g. `VOD.L@LSE@GBP` for London within the
+`EU` group). Built-in markets (fixed presets in `src/tradingbot/markets.py`
+— edit that file for a different exchange or session):
+
+| Market | Default exchange/currency | Session |
+|---|---|---|
+| `US` | SMART / USD | ~4:00–20:00 ET (includes pre/post-market) |
+| `EU` | IBIS (Xetra) / EUR | 9:00–17:30 CET |
+| `ASIA` | SEHK (Hong Kong) / HKD | 9:30–16:00 HKT |
+| `CRYPTO` | PAXOS / USD | 24/7, daily 23:55 UTC flatten checkpoint |
+
+**This is not true zero-downtime.** Every stock exchange still closes on
+weekends, and there's a gap between the US close and Asia's next open — only
+crypto here trades continuously. Combining all four markets gets you close
+to round-the-clock weekday coverage with brief gaps, not literal 24/7.
+
+**Costs and requirements:**
+- Non-US market data (EU, Asia) typically needs a separate IB market data
+  subscription beyond the default US entitlements.
+- Crypto trading requires IB crypto trading permissions on your account.
+- Cross-currency position sizing needs live IB market data access to the
+  relevant FX pair.
+- US extended hours have materially thinner liquidity/wider spreads than the
+  regular session.
+- Hong Kong's midday trading halt (~12:00–13:00 HKT) isn't modeled; orders
+  simply won't fill until the exchange resumes trading.
 
 ## Prerequisites
 
@@ -155,9 +204,16 @@ interval reasonable.
 - Market-hours logic doesn't account for exchange holidays or early closes —
   plug in [`pandas_market_calendars`](https://pypi.org/project/pandas-market-calendars/)
   for full holiday-awareness.
+- Market presets (exchange/currency/session) are fixed in `markets.py`, not
+  settings — covers one representative exchange per region (Xetra, Hong
+  Kong); other exchanges need a per-symbol `@EXCHANGE@CURRENCY` override or
+  editing the presets directly.
+- Hong Kong's midday trading halt isn't modeled as a split session.
 - The bundled strategy (EMA cross + RSI + VWAP) is a straightforward,
-  well-known starting point, not a proven money-maker — backtest and paper
-  trade before trusting it with real capital.
+  well-known starting point tuned for stocks, not a proven money-maker —
+  crypto's different volatility profile in particular hasn't been separately
+  validated. Backtest and paper trade before trusting any of it with real
+  capital.
 - No built-in backtesting engine yet; `strategy/` is decoupled from IB
   specifically so historical OHLCV data can be replayed through the same
   `generate_signal()` logic.

@@ -1,5 +1,9 @@
 """Trading engine: ties together data, strategy, risk and execution into the
-main day-trading loop. Never holds positions overnight."""
+main trading loop across one or more markets (see tradingbot.markets).
+Each symbol's market session independently governs when it trades and when
+it gets force-flattened -- never holds positions past its own market's
+session close (or, for always-open markets like crypto, past a daily
+synthetic checkpoint)."""
 from __future__ import annotations
 
 import asyncio
@@ -12,11 +16,14 @@ from tradingbot.config import Settings
 from tradingbot.data.bars import BarStream
 from tradingbot.data.indicators import add_indicators
 from tradingbot.execution.order_manager import OrderManager
-from tradingbot.market_hours import MarketHours
+from tradingbot.fx import FxConverter
+from tradingbot.market_hours import MarketSession
+from tradingbot.markets import BUILTIN_MARKETS, build_session
 from tradingbot.news.monitor import NewsMonitor
 from tradingbot.risk.manager import RiskManager
 from tradingbot.strategy.base import Signal, Strategy
 from tradingbot.strategy.ema_rsi_momentum import EmaRsiVwapMomentum
+from tradingbot.symbols import SymbolSpec
 
 log = logging.getLogger(__name__)
 
@@ -44,30 +51,50 @@ class TradingEngine:
             max_concurrent_positions=settings.max_concurrent_positions,
             max_position_pct=settings.max_position_pct,
         )
-        self.market_hours = MarketHours(
-            settings.market_open,
-            settings.market_close,
-            settings.no_new_entries_before_close_min,
-            settings.flatten_before_close_min,
-        )
         self.contracts: dict[str, Contract] = {}
         self._bar_counts: dict[str, int] = {}
-        self._flattened_for_day = False
         self.news_monitor: NewsMonitor | None = None
+        self.base_currency = "USD"
+
+        self.symbol_specs: list[SymbolSpec] = settings.symbol_specs
+        self.spec_by_symbol: dict[str, SymbolSpec] = {s.symbol: s for s in self.symbol_specs}
+        self.symbols_by_market: dict[str, list[str]] = {}
+        for spec in self.symbol_specs:
+            self.symbols_by_market.setdefault(spec.market, []).append(spec.symbol)
+
+        self.market_sessions: dict[str, MarketSession] = {
+            market_name: build_session(
+                BUILTIN_MARKETS[market_name],
+                settings.no_new_entries_before_close_min,
+                settings.flatten_before_close_min,
+            )
+            for market_name in self.symbols_by_market
+        }
+        self._flattened_today: dict[str, bool] = {m: False for m in self.symbols_by_market}
 
     async def start(self) -> None:
         await self.broker.connect_with_retry()
         self.bars = BarStream(self.broker.ib, self.settings.bar_size)
         self.orders = OrderManager(self.broker.ib)
+        self.fx = FxConverter(self.broker.ib)
 
-        for symbol in self.settings.symbol_list:
-            contract = await self.broker.qualify_stock(symbol)
-            self.contracts[symbol] = contract
-            await self.bars.subscribe(symbol, contract)
-            self._bar_counts[symbol] = 0
+        for spec in self.symbol_specs:
+            contract = await self.broker.qualify_contract(
+                spec.security_type, spec.symbol, spec.exchange, spec.currency
+            )
+            self.contracts[spec.symbol] = contract
+            preset = BUILTIN_MARKETS[spec.market]
+            await self.bars.subscribe(
+                spec.symbol,
+                contract,
+                use_rth=not preset.outside_rth,
+                what_to_show="AGGTRADES" if spec.security_type == "CRYPTO" else "TRADES",
+            )
+            self._bar_counts[spec.symbol] = 0
 
         await asyncio.sleep(2)  # let the first snapshot of bars arrive
         equity = self.broker.account_net_liquidation()
+        self.base_currency = self.broker.account_base_currency()
         self.risk.start_new_session(equity)
 
         if self.settings.enable_news_monitor:
@@ -76,7 +103,10 @@ class TradingEngine:
 
     async def run_forever(self) -> None:
         await self.start()
-        log.info("Trading engine running. Symbols=%s", self.settings.symbol_list)
+        log.info(
+            "Trading engine running. Markets=%s",
+            {m: syms for m, syms in self.symbols_by_market.items()},
+        )
         try:
             while True:
                 await self._tick()
@@ -100,34 +130,49 @@ class TradingEngine:
         return 0.0
 
     async def _tick(self) -> None:
-        if not self.market_hours.is_market_open():
-            return
-
         equity = self.broker.account_net_liquidation()
 
-        if self.market_hours.should_flatten():
-            if not self._flattened_for_day:
-                self.orders.flatten_all()
-                self._flattened_for_day = True
-            return
-        self._flattened_for_day = False
-
-        kill_switch = self.risk.check_daily_loss_limit(equity)
-        if kill_switch:
+        if self.risk.check_daily_loss_limit(equity):
             self.orders.flatten_all()
             return
-
-        stop_new_entries = self.market_hours.should_stop_new_entries()
 
         open_position_count = sum(
             1 for s in self.settings.symbol_list if self._position_qty(self.contracts[s]) != 0
         )
 
-        for symbol in self.settings.symbol_list:
-            await self._process_symbol(symbol, equity, open_position_count, stop_new_entries)
+        for market_name, session in self.market_sessions.items():
+            await self._tick_market(market_name, session, equity, open_position_count)
+
+    async def _tick_market(
+        self, market_name: str, session: MarketSession, equity: float, open_position_count: int
+    ) -> None:
+        symbols = self.symbols_by_market[market_name]
+
+        if session.should_flatten():
+            if not self._flattened_today[market_name]:
+                self.orders.flatten_contracts([self.contracts[s] for s in symbols])
+                self._flattened_today[market_name] = True
+            return
+        self._flattened_today[market_name] = False
+
+        if not session.is_open():
+            return
+
+        stop_new_entries = session.should_stop_new_entries()
+        outside_rth = BUILTIN_MARKETS[market_name].outside_rth
+
+        for symbol in symbols:
+            await self._process_symbol(
+                symbol, equity, open_position_count, stop_new_entries, outside_rth
+            )
 
     async def _process_symbol(
-        self, symbol: str, equity: float, open_position_count: int, stop_new_entries: bool
+        self,
+        symbol: str,
+        equity: float,
+        open_position_count: int,
+        stop_new_entries: bool,
+        outside_rth: bool,
     ) -> None:
         contract = self.contracts[symbol]
         df = self.bars.dataframe(symbol)
@@ -183,19 +228,28 @@ class TradingEngine:
             target_price = entry_price - target_dist
             action = "SELL"
 
-        quantity = self.risk.position_size(equity, entry_price, stop_price)
+        spec = self.spec_by_symbol[symbol]
+        equity_local = (
+            await self.fx.convert(equity, self.base_currency, spec.currency)
+            if spec.currency != self.base_currency
+            else equity
+        )
+        quantity = self.risk.position_size(equity_local, entry_price, stop_price)
         if quantity <= 0:
             log.info("%s: signal %s but computed position size is 0, skipping.", symbol, signal)
             return
 
         log.info(
-            "%s: %s signal -> %s %d shares @ ~%.2f, stop=%.2f, target=%.2f",
+            "%s: %s signal -> %s %d shares @ ~%.2f %s, stop=%.2f, target=%.2f",
             symbol,
             signal,
             action,
             quantity,
             entry_price,
+            spec.currency,
             stop_price,
             target_price,
         )
-        self.orders.place_bracket(contract, action, quantity, stop_price, target_price)
+        self.orders.place_bracket(
+            contract, action, quantity, stop_price, target_price, outside_rth=outside_rth
+        )

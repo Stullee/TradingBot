@@ -1,0 +1,8 @@
+ib_async>=1.0.3
+pydantic>=2.7
+pydantic-settings>=2.3
+pandas>=2.2
+numpy>=1.26
+pytz>=2024.1
+python-dotenv>=1.0
+pytest>=8.2

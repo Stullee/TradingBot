@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from ib_async import Contract
 
@@ -28,6 +29,7 @@ from tradingbot.symbols import SymbolSpec
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL_SEC = 10
+POLLED_BARS_REFRESH_SEC = 60
 
 
 class TradingEngine:
@@ -71,6 +73,7 @@ class TradingEngine:
             for market_name in self.symbols_by_market
         }
         self._flattened_today: dict[str, bool] = {m: False for m in self.symbols_by_market}
+        self._last_polled_refresh = 0.0
 
     async def start(self) -> None:
         await self.broker.connect_with_retry()
@@ -84,11 +87,16 @@ class TradingEngine:
                     spec.security_type, spec.symbol, spec.exchange, spec.currency
                 )
                 preset = BUILTIN_MARKETS[spec.market]
+                is_crypto = spec.security_type == "CRYPTO"
                 await self.bars.subscribe(
                     spec.symbol,
                     contract,
                     use_rth=not preset.outside_rth,
-                    what_to_show="AGGTRADES" if spec.security_type == "CRYPTO" else "TRADES",
+                    what_to_show="AGGTRADES" if is_crypto else "TRADES",
+                    # IB rejects keepUpToDate=True ("live updates") for crypto
+                    # contracts, so crypto bars are refreshed by polling instead
+                    # (see engine._tick's periodic refresh_all_polled() call).
+                    live_updates=not is_crypto,
                 )
             except Exception as exc:  # noqa: BLE001 - one bad symbol must not take down the rest
                 log.error(
@@ -127,9 +135,14 @@ class TradingEngine:
         )
         try:
             while True:
-                await self._tick()
-                if self.news_monitor is not None:
-                    await self.news_monitor.tick()
+                try:
+                    await self._tick()
+                    if self.news_monitor is not None:
+                        await self.news_monitor.tick()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - one bad tick must not kill the process
+                    log.exception("Unhandled error in engine tick, continuing.")
                 await asyncio.sleep(POLL_INTERVAL_SEC)
         except asyncio.CancelledError:
             log.info("Engine stopping...")
@@ -161,6 +174,11 @@ class TradingEngine:
         return 0.0
 
     async def _tick(self) -> None:
+        now = time.monotonic()
+        if now - self._last_polled_refresh >= POLLED_BARS_REFRESH_SEC:
+            self._last_polled_refresh = now
+            await self.bars.refresh_all_polled()
+
         equity = self.broker.account_net_liquidation()
 
         if self.risk.check_daily_loss_limit(equity):
@@ -168,7 +186,7 @@ class TradingEngine:
             return
 
         open_position_count = sum(
-            1 for s in self.settings.symbol_list if self._position_qty(self.contracts[s]) != 0
+            1 for contract in self.contracts.values() if self._position_qty(contract) != 0
         )
 
         for market_name, session in self.market_sessions.items():

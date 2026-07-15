@@ -61,7 +61,7 @@ and extend trading-hours coverage. Format:
 MARKET:sym1,sym2,sym3@EXCHANGE@CURRENCY;MARKET2:sym4,...
 ```
 
-Example: `US:AAPL,MSFT,NVDA;EU:SAP,ASML@AEB@EUR;ASIA:0700.HK;CRYPTO:BTC,ETH`
+Example: `US:AAPL,MSFT,NVDA;EU:SAP,ASML@AEB@EUR;ASIA:700;CRYPTO:BTC,ETH`
 
 Built-in markets (fixed presets — see the repo's `src/tradingbot/markets.py`
 to change exchange/currency/session defaults):

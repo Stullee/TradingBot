@@ -78,7 +78,7 @@ Set `MARKETS` (instead of `SYMBOLS`) in `.env` to trade across more than
 just US stocks:
 
 ```
-MARKETS=US:AAPL,MSFT,NVDA;EU:SAP,ASML@AEB@EUR;ASIA:0700.HK;CRYPTO:BTC,ETH
+MARKETS=US:AAPL,MSFT,NVDA;EU:SAP,ASML@AEB@EUR;ASIA:700;CRYPTO:BTC,ETH
 ```
 
 Format: `MARKET:sym1,sym2,sym3@EXCHANGE@CURRENCY;MARKET2:sym4,...` — a bare

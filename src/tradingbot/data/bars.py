@@ -70,6 +70,17 @@ class BarStream:
             keepUpToDate=False,
         )
         self._bar_lists[symbol] = bars
+        if bars:
+            last = bars[-1]
+            log.info(
+                "%s: %d bars, latest close=%.2f @ %s",
+                symbol,
+                len(bars),
+                last.close,
+                last.date,
+            )
+        else:
+            log.warning("%s: refresh returned no bars (still no market data?)", symbol)
 
     async def refresh_all_polled(self) -> None:
         for symbol in list(self._polled):

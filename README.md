@@ -103,6 +103,10 @@ to round-the-clock weekday coverage with brief gaps, not literal 24/7.
 - Non-US market data (EU, Asia) typically needs a separate IB market data
   subscription beyond the default US entitlements.
 - Crypto trading requires IB crypto trading permissions on your account.
+  The default `PAXOS` venue is for US-regulated (IBKR LLC) accounts; EU
+  accounts (IBKR Ireland/EEA "Europe - Crypto-Assets" permission) trade
+  crypto via Zero Hash instead -- override per symbol, e.g.
+  `CRYPTO:BTC@ZEROHASH@USD` (try `@EUR` if `@USD` doesn't qualify).
 - Cross-currency position sizing needs live IB market data access to the
   relevant FX pair.
 - US extended hours have materially thinner liquidity/wider spreads than the

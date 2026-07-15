@@ -84,7 +84,10 @@ open. Only crypto trades continuously.
 - Non-US market data (EU, Asia) typically needs a separate IB market data
   subscription (billed monthly by IB) beyond the default US entitlements.
 - Crypto trading requires IB crypto trading permissions enabled on your
-  account.
+  account. The default `PAXOS` venue is for US-regulated (IBKR LLC)
+  accounts; EU accounts (IBKR Ireland/EEA "Europe - Crypto-Assets"
+  permission) trade crypto via Zero Hash instead -- override per symbol,
+  e.g. `CRYPTO:BTC@ZEROHASH@USD` (try `@EUR` if `@USD` doesn't qualify).
 - Position sizing across currencies uses a live FX rate fetched from IB to
   convert your account's base-currency risk budget into each symbol's local
   currency — this needs IB market data access to the relevant FX pair.

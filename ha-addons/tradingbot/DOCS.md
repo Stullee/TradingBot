@@ -61,7 +61,7 @@ and extend trading-hours coverage. Format:
 MARKET:sym1,sym2,sym3@EXCHANGE@CURRENCY;MARKET2:sym4,...
 ```
 
-Example: `US:AAPL,MSFT,NVDA;EU:SAP.DE,ASML.AS@AEB@EUR;ASIA:0700.HK;CRYPTO:BTC,ETH`
+Example: `US:AAPL,MSFT,NVDA;EU:SAP,ASML@AEB@EUR;ASIA:0700.HK;CRYPTO:BTC,ETH`
 
 Built-in markets (fixed presets — see the repo's `src/tradingbot/markets.py`
 to change exchange/currency/session defaults):
@@ -74,7 +74,7 @@ to change exchange/currency/session defaults):
 | `CRYPTO` | PAXOS / USD | 24/7, with a daily 23:55 UTC flatten checkpoint |
 
 Override a symbol's exchange/currency with `SYMBOL@EXCHANGE@CURRENCY`, e.g.
-`VOD.L@LSE@GBP` for a London-listed stock inside the `EU` market group.
+`VOD@LSE@GBP` for a London-listed stock inside the `EU` market group.
 
 **No true zero-downtime:** even using all four, every stock exchange still
 closes on weekends and there's a gap between the US close and Asia's next

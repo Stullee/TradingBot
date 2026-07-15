@@ -78,19 +78,37 @@ class TradingEngine:
         self.orders = OrderManager(self.broker.ib)
         self.fx = FxConverter(self.broker.ib)
 
-        for spec in self.symbol_specs:
-            contract = await self.broker.qualify_contract(
-                spec.security_type, spec.symbol, spec.exchange, spec.currency
-            )
+        for spec in list(self.symbol_specs):
+            try:
+                contract = await self.broker.qualify_contract(
+                    spec.security_type, spec.symbol, spec.exchange, spec.currency
+                )
+                preset = BUILTIN_MARKETS[spec.market]
+                await self.bars.subscribe(
+                    spec.symbol,
+                    contract,
+                    use_rth=not preset.outside_rth,
+                    what_to_show="AGGTRADES" if spec.security_type == "CRYPTO" else "TRADES",
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad symbol must not take down the rest
+                log.error(
+                    "Skipping %s (%s/%s/%s): %s. Fix and restart the bot to pick it back up.",
+                    spec.symbol,
+                    spec.market,
+                    spec.exchange,
+                    spec.currency,
+                    exc,
+                )
+                self._drop_symbol(spec)
+                continue
+
             self.contracts[spec.symbol] = contract
-            preset = BUILTIN_MARKETS[spec.market]
-            await self.bars.subscribe(
-                spec.symbol,
-                contract,
-                use_rth=not preset.outside_rth,
-                what_to_show="AGGTRADES" if spec.security_type == "CRYPTO" else "TRADES",
-            )
             self._bar_counts[spec.symbol] = 0
+
+        if not self.contracts:
+            raise RuntimeError(
+                "No symbols could be qualified -- check the MARKETS/SYMBOLS config."
+            )
 
         await asyncio.sleep(2)  # let the first snapshot of bars arrive
         equity = self.broker.account_net_liquidation()
@@ -122,6 +140,19 @@ class TradingEngine:
             self.broker.disconnect()
             if self.news_monitor is not None:
                 await self.news_monitor.aclose()
+
+    def _drop_symbol(self, spec: SymbolSpec) -> None:
+        """Removes a symbol that failed to qualify from the active trading set,
+        cleaning up its market/session entirely if it was the last symbol in it."""
+        self.symbol_specs.remove(spec)
+        self.spec_by_symbol.pop(spec.symbol, None)
+        symbols = self.symbols_by_market.get(spec.market)
+        if symbols and spec.symbol in symbols:
+            symbols.remove(spec.symbol)
+        if not symbols:
+            self.symbols_by_market.pop(spec.market, None)
+            self.market_sessions.pop(spec.market, None)
+            self._flattened_today.pop(spec.market, None)
 
     def _position_qty(self, contract: Contract) -> float:
         for p in self.broker.ib.positions():

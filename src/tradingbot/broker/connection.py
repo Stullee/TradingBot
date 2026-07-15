@@ -63,6 +63,13 @@ class BrokerConnection:
         else:
             contract = Stock(symbol, exchange, currency)
         [qualified] = await self.ib.qualifyContractsAsync(contract)
+        if qualified is None or not getattr(qualified, "conId", None):
+            raise ValueError(
+                f"IB could not resolve {symbol!r} on {exchange}/{currency}. "
+                "Double check IB's own symbol format for this exchange -- it often "
+                "differs from other data providers (e.g. no '.DE'/'.L'/'.AS' suffix; "
+                "the exchange field already disambiguates the listing)."
+            )
         return qualified
 
     def account_net_liquidation(self) -> float:

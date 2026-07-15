@@ -78,12 +78,12 @@ Set `MARKETS` (instead of `SYMBOLS`) in `.env` to trade across more than
 just US stocks:
 
 ```
-MARKETS=US:AAPL,MSFT,NVDA;EU:SAP.DE,ASML.AS@AEB@EUR;ASIA:0700.HK;CRYPTO:BTC,ETH
+MARKETS=US:AAPL,MSFT,NVDA;EU:SAP,ASML@AEB@EUR;ASIA:0700.HK;CRYPTO:BTC,ETH
 ```
 
 Format: `MARKET:sym1,sym2,sym3@EXCHANGE@CURRENCY;MARKET2:sym4,...` — a bare
 symbol uses that market's default exchange/currency; append
-`@EXCHANGE@CURRENCY` to override (e.g. `VOD.L@LSE@GBP` for London within the
+`@EXCHANGE@CURRENCY` to override (e.g. `VOD@LSE@GBP` for London within the
 `EU` group). Built-in markets (fixed presets in `src/tradingbot/markets.py`
 — edit that file for a different exchange or session):
 

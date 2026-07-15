@@ -1,6 +1,6 @@
 ---
 name: TradingBot (IB Day Trading)
-version: "0.1.0"
+version: "0.2.0"
 slug: tradingbot
 description: >-
   Automated intraday day-trading bot for Interactive Brokers. EMA/RSI/VWAP
@@ -42,6 +42,13 @@ options:
   no_new_entries_before_close_min: 15
   flatten_before_close_min: 5
   log_level: "info"
+  enable_news_monitor: false
+  finnhub_api_key: ""
+  anthropic_api_key: ""
+  news_model: "claude-haiku-4-5-20251001"
+  news_confidence_threshold: 0.6
+  news_poll_interval_sec: 300
+  news_max_hold_min: 240
 schema:
   ib_host: str
   ib_port: port
@@ -70,3 +77,10 @@ schema:
   no_new_entries_before_close_min: int(0,120)
   flatten_before_close_min: int(0,60)
   log_level: list(debug|info|warning|error)
+  enable_news_monitor: bool
+  finnhub_api_key: password
+  anthropic_api_key: password
+  news_model: str
+  news_confidence_threshold: float(0,1)
+  news_poll_interval_sec: int(60,3600)
+  news_max_hold_min: int(5,1440)

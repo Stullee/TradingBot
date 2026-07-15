@@ -13,6 +13,7 @@ from tradingbot.data.bars import BarStream
 from tradingbot.data.indicators import add_indicators
 from tradingbot.execution.order_manager import OrderManager
 from tradingbot.market_hours import MarketHours
+from tradingbot.news.monitor import NewsMonitor
 from tradingbot.risk.manager import RiskManager
 from tradingbot.strategy.base import Signal, Strategy
 from tradingbot.strategy.ema_rsi_momentum import EmaRsiVwapMomentum
@@ -52,6 +53,7 @@ class TradingEngine:
         self.contracts: dict[str, Contract] = {}
         self._bar_counts: dict[str, int] = {}
         self._flattened_for_day = False
+        self.news_monitor: NewsMonitor | None = None
 
     async def start(self) -> None:
         await self.broker.connect_with_retry()
@@ -68,12 +70,18 @@ class TradingEngine:
         equity = self.broker.account_net_liquidation()
         self.risk.start_new_session(equity)
 
+        if self.settings.enable_news_monitor:
+            self.news_monitor = NewsMonitor(self.settings, self.bars)
+            log.info("News sentiment shadow-trading enabled (observation only).")
+
     async def run_forever(self) -> None:
         await self.start()
         log.info("Trading engine running. Symbols=%s", self.settings.symbol_list)
         try:
             while True:
                 await self._tick()
+                if self.news_monitor is not None:
+                    await self.news_monitor.tick()
                 await asyncio.sleep(POLL_INTERVAL_SEC)
         except asyncio.CancelledError:
             log.info("Engine stopping...")
@@ -82,6 +90,8 @@ class TradingEngine:
             self.orders.flatten_all()
             self.bars.unsubscribe_all()
             self.broker.disconnect()
+            if self.news_monitor is not None:
+                await self.news_monitor.aclose()
 
     def _position_qty(self, contract: Contract) -> float:
         for p in self.broker.ib.positions():

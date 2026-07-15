@@ -50,6 +50,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_dir: str = "logs"
 
+    # News sentiment shadow-trading (observation only, never places real orders)
+    enable_news_monitor: bool = False
+    finnhub_api_key: str = ""
+    anthropic_api_key: str = ""
+    news_model: str = "claude-haiku-4-5-20251001"
+    news_confidence_threshold: float = 0.6
+    news_poll_interval_sec: int = 300
+    news_max_hold_min: int = 240
+
     @field_validator("symbols")
     @classmethod
     def _symbols_not_empty(cls, v: str) -> str:
@@ -64,6 +73,15 @@ class Settings(BaseSettings):
                 f"IB_PORT={self.ib_port} looks like a LIVE trading port. "
                 "Set ALLOW_LIVE_TRADING=true explicitly if this is intentional. "
                 "Refusing to start to avoid accidentally trading real money."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _guard_news_monitor(self) -> "Settings":
+        if self.enable_news_monitor and not (self.finnhub_api_key and self.anthropic_api_key):
+            raise ValueError(
+                "ENABLE_NEWS_MONITOR=true requires both FINNHUB_API_KEY and "
+                "ANTHROPIC_API_KEY to be set."
             )
         return self
 

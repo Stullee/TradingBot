@@ -34,6 +34,10 @@ running it directly (plain Python / your own server).
   swing-trading bot.
 - Defaults to Interactive Brokers' **paper trading** port and refuses to
   start against a live port unless you explicitly opt in.
+- **Optional news sentiment shadow-trading** (`ENABLE_NEWS_MONITOR=true`):
+  polls Finnhub for news per symbol, has Claude assess each new article,
+  and — observation only, never real orders — simulates a hypothetical
+  trade to log whether the call would have been right. See below.
 
 ## Architecture
 
@@ -47,6 +51,7 @@ src/tradingbot/
   strategy/               pluggable Strategy interface + EmaRsiVwapMomentum
   risk/manager.py         position sizing + daily loss kill switch
   execution/order_manager.py  bracket orders + flatten-all
+  news/                   news sentiment shadow-trading (see below)
   engine.py               orchestrates the whole loop
   main.py                 entry point
 ```
@@ -120,6 +125,30 @@ Going live is a deliberate, explicit action:
    `MAX_DAILY_LOSS_PCT`, and `MAX_CONCURRENT_POSITIONS=1` until you trust the
    bot's behavior in live conditions (fills, slippage, latency all differ
    from paper trading).
+
+## News sentiment shadow-trading
+
+Set `ENABLE_NEWS_MONITOR=true` plus `FINNHUB_API_KEY` and `ANTHROPIC_API_KEY`
+in `.env` to turn this on. Every `NEWS_POLL_INTERVAL_SEC`, the bot fetches
+recent news per symbol from [Finnhub](https://finnhub.io) (free tier works),
+sends each new article to Claude for a structured LONG/SHORT/NONE +
+confidence assessment (`src/tradingbot/news/sentiment.py`), and — above
+`NEWS_CONFIDENCE_THRESHOLD` — opens a **simulated** trade sized with the same
+ATR stop/target rules as the real strategy (`src/tradingbot/news/shadow_trade.py`).
+It's tracked against the bot's own live bar data until the stop, the target,
+or `NEWS_MAX_HOLD_MIN` is hit, then logged as a win/loss/timeout with an
+R-multiple to `logs/shadow_trades.jsonl`.
+
+**This never places a real order.** It's a way to evaluate whether the news
+signal would have been profitable before ever considering wiring it to real
+execution — which, if you get there, is a materially higher-risk feature
+than the pure-technical strategy (headline speed races against firms with
+structurally lower latency, LLM interpretation can misread nuance/sarcasm,
+and it's much harder to backtest than price-based signals).
+
+It also costs real money to run: one Finnhub call per symbol per poll
+interval, one Anthropic API call per new article seen. Keep the poll
+interval reasonable.
 
 ## Known limitations / possible next steps
 

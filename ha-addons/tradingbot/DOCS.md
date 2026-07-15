@@ -44,6 +44,31 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `no_new_entries_before_close_min` | Stop opening new trades this many minutes before close |
 | `flatten_before_close_min` | Force-close all positions this many minutes before close |
 | `log_level` | `debug`, `info`, `warning`, or `error` |
+| `enable_news_monitor` | Enable news sentiment shadow-trading (see below). Disabled by default |
+| `finnhub_api_key` | API key from [finnhub.io](https://finnhub.io) (free tier available) |
+| `anthropic_api_key` | Your Anthropic API key, used to have Claude assess each news article |
+| `news_model` | Claude model id used for assessment (default: a fast/cheap Haiku model) |
+| `news_confidence_threshold` | Minimum model confidence (0-1) required to open a shadow trade |
+| `news_poll_interval_sec` | How often to actually poll for new articles |
+| `news_max_hold_min` | Force-close a shadow trade after this long if neither stop nor target hit |
+
+## News sentiment shadow-trading
+
+When `enable_news_monitor` is on, the add-on additionally polls Finnhub for
+news on your configured symbols, has Claude assess whether each new article
+is likely to move the price, and — above `news_confidence_threshold` —
+**simulates** a hypothetical trade using the same ATR stop/target sizing as
+the real strategy. It logs the outcome (win/loss/timeout, R-multiple) to
+`/data/logs/shadow_trades.jsonl`.
+
+**This never places real orders.** It exists purely to let you evaluate
+whether the news-sentiment signal would have been profitable, before ever
+considering wiring it to real execution.
+
+**Cost note:** this makes real, billed API calls — one Finnhub request per
+symbol per poll interval, and one Anthropic API call per new article seen.
+Keep `news_poll_interval_sec` reasonable (the default is 5 minutes) to avoid
+surprises on both providers' usage/rate limits.
 
 ## Logs
 

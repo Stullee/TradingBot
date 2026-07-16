@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ib_async import Contract
 
@@ -167,6 +168,9 @@ class TradingEngine:
         equity = self.broker.account_net_liquidation()
         self.base_currency = self.broker.account_base_currency()
         self.risk.start_new_session(equity)
+        self.broker.enable_realized_pnl_persistence(
+            Path(self.settings.log_dir) / "realized_pnl.json"
+        )
 
         if self.settings.enable_news_monitor:
             self.news_monitor = NewsMonitor(self.settings, self.bars)

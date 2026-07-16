@@ -163,7 +163,10 @@ news on your configured symbols, has Claude assess whether each new article
 is likely to move the price, and — above `news_confidence_threshold` —
 **simulates** a hypothetical trade using the same ATR stop/target sizing as
 the real strategy. It logs the outcome (win/loss/timeout, R-multiple) to
-`/data/logs/shadow_trades.jsonl`.
+`/data/logs/shadow_trades.jsonl`. Any still-open shadow trade is also
+mirrored to `/data/logs/open_shadow_trades.json` and restored from there on
+startup, so a restart (add-on rebuild included) doesn't silently drop a
+trade that was still in flight.
 
 **This never places real orders.** It exists purely to let you evaluate
 whether the news-sentiment signal would have been profitable, before ever
@@ -200,8 +203,10 @@ whether anything was found, so silence there (not just silence in
 
 `python addon_report_entrypoint.py` (same `docker exec` pattern as the
 backtester, see below) prints a snapshot: account equity, open positions
-with unrealized P&L, today's realized P&L per symbol, today's fill count,
-and — reading straight from the persisted files above — news
+with unrealized P&L, today's realized P&L per symbol (also persisted to
+`/data/logs/realized_pnl.json` so a restart doesn't lose P&L for a position
+that already fully closed), today's fill count, and — reading straight
+from the persisted files above — news
 shadow-trading win rate/expectancy and news-analysis activity. Read-only,
 places no orders.
 

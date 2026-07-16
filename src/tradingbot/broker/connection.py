@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from pathlib import Path
 
 from ib_async import IB, Contract, Crypto, PortfolioItem, Stock
 
@@ -22,13 +24,37 @@ class BrokerConnection:
         # realizedPNL with it. Tracked here independently, keyed by symbol,
         # so a fully closed position's realized P&L stays visible (e.g. in
         # the live dashboard/report) instead of vanishing the moment it
-        # flattens. Reflects realized P&L since this connection was opened.
+        # flattens.
         self.realized_pnl_by_symbol: dict[str, float] = {}
+        self._realized_pnl_persist_path: Path | None = None
         self.ib.updatePortfolioEvent += self._on_portfolio_update
         self._closing = False
 
+    def enable_realized_pnl_persistence(self, path: Path) -> None:
+        """Opt-in: loads any realized P&L persisted by a previous run of
+        *this* connection (so a restart doesn't reset "today's" P&L back to
+        empty), then keeps writing updates to `path` from then on.
+
+        Deliberately not automatic in __init__ -- this class is also used
+        for short-lived, one-off connections (CLI report, backtester,
+        trend-filter comparison) that share the account's live
+        updatePortfolio stream but hold no history of their own. If one of
+        those also persisted, its near-empty in-memory tracker would
+        overwrite the live engine's file with a snapshot missing everything
+        that closed before it connected. Only the long-running live engine
+        should call this."""
+        self._realized_pnl_persist_path = path
+        if path.exists():
+            try:
+                self.realized_pnl_by_symbol.update(json.loads(path.read_text()))
+            except (json.JSONDecodeError, OSError):
+                log.warning("Could not read %s, starting with no realized P&L history.", path)
+
     def _on_portfolio_update(self, item: PortfolioItem) -> None:
         self.realized_pnl_by_symbol[item.contract.symbol] = item.realizedPNL
+        if self._realized_pnl_persist_path is not None:
+            self._realized_pnl_persist_path.parent.mkdir(parents=True, exist_ok=True)
+            self._realized_pnl_persist_path.write_text(json.dumps(self.realized_pnl_by_symbol))
 
     async def connect(self) -> None:
         s = self.settings

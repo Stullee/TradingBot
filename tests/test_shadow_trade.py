@@ -124,3 +124,44 @@ def test_update_on_symbol_with_no_open_trade_is_a_noop(tmp_path):
     tracker = make_tracker(tmp_path)
     tracker.update("AAPL", current_price=100.0)  # should not raise
     assert not tracker.has_open("AAPL")
+
+
+def test_open_trades_survive_a_restart(tmp_path):
+    # Simulates a restart: a fresh ShadowTradeTracker pointed at the same
+    # log_path must pick up whatever was still open when the previous one
+    # stopped, instead of silently forgetting it.
+    tracker = make_tracker(tmp_path)
+    tracker.open(
+        "AAPL", "LONG", entry_price=100.0, stop_price=98.0, target_price=104.0,
+        headline="h", confidence=0.8, rationale="r",
+    )
+
+    restarted = make_tracker(tmp_path)
+    assert restarted.has_open("AAPL")
+    trade = restarted.open_trades["AAPL"]
+    assert trade.entry_price == 100.0
+    assert trade.stop_price == 98.0
+    assert trade.target_price == 104.0
+
+
+def test_closing_a_trade_removes_it_from_the_persisted_state(tmp_path):
+    tracker = make_tracker(tmp_path)
+    tracker.open(
+        "AAPL", "LONG", entry_price=100.0, stop_price=98.0, target_price=104.0,
+        headline="h", confidence=0.8, rationale="r",
+    )
+    tracker.update("AAPL", current_price=105.0)  # hits target -> closes
+
+    restarted = make_tracker(tmp_path)
+    assert not restarted.has_open("AAPL")
+
+
+def test_missing_open_state_file_starts_with_no_open_trades(tmp_path):
+    tracker = make_tracker(tmp_path)
+    assert tracker.open_trades == {}
+
+
+def test_corrupt_open_state_file_is_ignored_not_raised(tmp_path):
+    tmp_path.joinpath("open_shadow_trades.json").write_text("not json")
+    tracker = make_tracker(tmp_path)
+    assert tracker.open_trades == {}

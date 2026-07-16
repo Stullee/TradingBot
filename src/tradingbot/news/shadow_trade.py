@@ -53,12 +53,43 @@ class ShadowTrade:
 
 
 class ShadowTradeTracker:
-    """At most one open shadow trade per symbol at a time."""
+    """At most one open shadow trade per symbol at a time.
+
+    Open trades are also mirrored to a JSON snapshot file (a sibling of
+    `log_path`) on every open/close, and reloaded from it on startup -- so a
+    restart (add-on rebuild, crash, manual bounce) doesn't silently drop
+    whatever shadow trades were still in flight. Only the closed-trade
+    outcome (the append-only log at `log_path`) matters for the win-rate/
+    avg-R stats; this snapshot exists purely for continuity of what's
+    currently open."""
 
     def __init__(self, log_path: Path, max_hold_min: int):
         self.log_path = log_path
         self.max_hold_min = max_hold_min
-        self.open_trades: dict[str, ShadowTrade] = {}
+        self.open_state_path = log_path.parent / "open_shadow_trades.json"
+        self.open_trades: dict[str, ShadowTrade] = self._load_open_state()
+
+    def _load_open_state(self) -> dict[str, ShadowTrade]:
+        if not self.open_state_path.exists():
+            return {}
+        try:
+            raw = json.loads(self.open_state_path.read_text())
+            trades = {symbol: ShadowTrade(**fields) for symbol, fields in raw.items()}
+        except (json.JSONDecodeError, OSError, TypeError):
+            log.warning("Could not read %s, starting with no open shadow trades.", self.open_state_path)
+            return {}
+        if trades:
+            log.info(
+                "Restored %d open shadow trade(s) from a previous run: %s",
+                len(trades),
+                ", ".join(sorted(trades)),
+            )
+        return trades
+
+    def _write_open_state(self) -> None:
+        self.open_state_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot = {symbol: asdict(trade) for symbol, trade in self.open_trades.items()}
+        self.open_state_path.write_text(json.dumps(snapshot))
 
     def has_open(self, symbol: str) -> bool:
         return symbol in self.open_trades
@@ -86,6 +117,7 @@ class ShadowTradeTracker:
             rationale=rationale,
         )
         self.open_trades[symbol] = trade
+        self._write_open_state()
         log.info(
             "[SHADOW] Opened %s %s @ %.2f (stop=%.2f, target=%.2f, confidence=%.2f) on news: %s",
             direction,
@@ -144,6 +176,7 @@ class ShadowTradeTracker:
         )
         self._append_to_log(trade)
         del self.open_trades[trade.symbol]
+        self._write_open_state()
 
     def _append_to_log(self, trade: ShadowTrade) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)

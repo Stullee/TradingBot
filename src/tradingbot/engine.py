@@ -192,7 +192,7 @@ class TradingEngine:
         )
 
         if self.settings.enable_news_monitor:
-            self.news_monitor = NewsMonitor(self.settings, self.bars)
+            self.news_monitor = NewsMonitor(self.settings, self.bars, self._is_symbol_market_open)
             log.info("News sentiment shadow-trading enabled (observation only).")
 
         if self.settings.enable_dashboard:
@@ -246,6 +246,20 @@ class TradingEngine:
             if p.contract.conId == contract.conId:
                 return p.position
         return 0.0
+
+    def _is_symbol_market_open(self, symbol: str) -> bool:
+        """Passed into NewsMonitor so it can skip opening a shadow trade (or
+        even calling Claude) for a symbol whose market is currently closed --
+        without this, a news hit outside trading hours would "enter" at
+        whatever price its last bar happened to close at, hours stale, not a
+        real opportunity."""
+        spec = self.spec_by_symbol.get(symbol)
+        if spec is None:
+            return False
+        session = self.market_sessions.get(spec.market)
+        if session is None:
+            return False
+        return session.is_open()
 
     async def _tick(self) -> None:
         now = time.monotonic()

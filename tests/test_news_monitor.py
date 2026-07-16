@@ -197,6 +197,48 @@ def test_no_analyzer_call_when_shadow_trade_already_open(tmp_path):
     assert monitor._seen_article_ids == {1}  # still marked seen, just never billed
 
 
+def test_no_shadow_trade_or_analyzer_call_when_market_is_closed(tmp_path):
+    """A news hit for a symbol whose market is currently closed must not
+    spend a Claude call or open a shadow trade at whatever price its last
+    bar happened to close at -- that price could be hours stale (the bug
+    this guards against: an EU symbol's shadow trade opened using its
+    pre-close price, hours after that market had actually closed)."""
+    articles = [{"id": 1, "headline": "headline"}]
+    settings = make_settings(tmp_path, symbol_list=["ASML"])
+    monitor = NewsMonitor(settings, bars=None, is_market_open=lambda symbol: False)
+    monitor.finnhub = FakeFinnhub({"ASML": articles})
+    monitor.shadow = FakeShadow()
+    fake_analyzer = FakeAnalyzer()
+    monitor.analyzer = fake_analyzer
+
+    asyncio.run(monitor._poll_news())
+
+    assert fake_analyzer.calls == []
+    assert monitor._seen_article_ids == {1}  # still marked seen, just never billed
+
+    lines = monitor._analysis_log_path.read_text().strip().splitlines()
+    record = json.loads(lines[0])
+    assert record["direction"] is None
+    assert "market closed" in record["skipped_reason"]
+
+
+def test_market_open_check_defaults_to_always_open(tmp_path):
+    """Callers that don't pass is_market_open (tests, one-off tools) get the
+    old unconditional behavior -- only the live engine wires up a real
+    per-symbol check."""
+    articles = [{"id": 1, "headline": "headline"}]
+    settings = make_settings(tmp_path, symbol_list=["AAPL"])
+    monitor = NewsMonitor(settings, bars=None)
+    monitor.finnhub = FakeFinnhub({"AAPL": articles})
+    monitor.shadow = FakeShadow()
+    fake_analyzer = FakeAnalyzer(NewsAssessment("NONE", 0.2, "r"))
+    monitor.analyzer = fake_analyzer
+
+    asyncio.run(monitor._poll_news())
+
+    assert len(fake_analyzer.calls) == 1
+
+
 def test_poll_completion_is_always_logged_even_with_nothing_new(tmp_path, caplog):
     """The bug this guards against: a poll that finds zero new articles for
     every symbol used to log nothing at all, making "the news monitor is

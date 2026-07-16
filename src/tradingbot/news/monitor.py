@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,9 +41,23 @@ _MAX_ARTICLES_PER_BATCH = 10
 
 
 class NewsMonitor:
-    def __init__(self, settings: Settings, bars: BarStream):
+    def __init__(
+        self,
+        settings: Settings,
+        bars: BarStream,
+        is_market_open: Callable[[str], bool] | None = None,
+    ):
         self.settings = settings
         self.bars = bars
+        # Whether `symbol`'s own market is currently open -- checked before
+        # opening a shadow trade (see _handle_articles) so a news hit outside
+        # trading hours doesn't "enter" at a last price that's really just a
+        # stale, hours-old bar (confirmed live: an EU symbol's shadow trade
+        # opened using its last close from before that market's close, hours
+        # after the fact). Defaults to "always open" for callers that don't
+        # care (tests, one-off tools) -- only the live engine passes a real
+        # per-symbol session check.
+        self._is_market_open = is_market_open or (lambda symbol: True)
         self.finnhub = FinnhubNewsClient(settings.finnhub_api_key)
         self.analyzer = NewsSentimentAnalyzer(settings.anthropic_api_key, settings.news_model)
         self.shadow = ShadowTradeTracker(
@@ -85,6 +100,7 @@ class NewsMonitor:
         article_ids: list[int],
         headlines: list[str],
         assessment: NewsAssessment | None,
+        skipped_reason: str = "shadow trade already open for this symbol",
     ) -> None:
         """Marks these article ids seen (never re-assessed again, even
         across a restart) and appends a record of what happened -- either a
@@ -95,7 +111,7 @@ class NewsMonitor:
             "article_ids": article_ids,
             "headlines": headlines,
             "assessed_at": datetime.now(timezone.utc).isoformat(),
-            "skipped_reason": None if assessment else "shadow trade already open for this symbol",
+            "skipped_reason": None if assessment else skipped_reason,
             "direction": assessment.direction if assessment else None,
             "confidence": assessment.confidence if assessment else None,
             "rationale": assessment.rationale if assessment else None,
@@ -178,6 +194,21 @@ class NewsMonitor:
         if self.shadow.has_open(symbol):
             self._persist_seen(symbol, article_ids, headlines, assessment=None)
             return  # one shadow trade per symbol at a time, keeps evaluation simple
+
+        if not self._is_market_open(symbol):
+            # A shadow trade opens at the last available bar's close --
+            # meaningless (and misleading for the win-rate/avg-R stats this
+            # is meant to inform) if that "current price" is actually hours
+            # stale because the symbol's market is closed. Skipped here,
+            # before the Claude call, not just before shadow.open(), so a
+            # news hit outside trading hours doesn't cost an assessment call
+            # for a trade that was never going to open anyway.
+            log.info("%s: market closed, skipping news assessment.", symbol)
+            self._persist_seen(
+                symbol, article_ids, headlines, assessment=None,
+                skipped_reason="market closed for this symbol",
+            )
+            return
 
         assessment = await self.analyzer.assess(symbol, articles)
         self._persist_seen(symbol, article_ids, headlines, assessment)

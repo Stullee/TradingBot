@@ -18,7 +18,7 @@ RUN apt-get update \
 # IMPORTANT: after pushing new commits you intend to deploy, update
 # TRADINGBOT_COMMIT to the new commit SHA, then use the add-on's "Rebuild"
 # button (not just "Restart") in the Home Assistant UI.
-ARG TRADINGBOT_COMMIT=73825af3818b7318c4d1133bb2b9c4c4775ce46e
+ARG TRADINGBOT_COMMIT=f5e6abbbd775ecbc115732e8016000b9bb10885e
 RUN pip install --no-cache-dir \
     "tradingbot @ git+https://github.com/Stullee/TradingBot.git@${TRADINGBOT_COMMIT}"
 

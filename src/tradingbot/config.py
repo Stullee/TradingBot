@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_dir: str = "logs"
 
+    # Backtesting (see tradingbot.backtest.runner). IB duration string, e.g.
+    # "30 D", "6 M", "1 Y" -- how far back to pull historical bars.
+    backtest_duration: str = "60 D"
+
     # News sentiment shadow-trading (observation only, never places real orders)
     enable_news_monitor: bool = False
     finnhub_api_key: str = ""

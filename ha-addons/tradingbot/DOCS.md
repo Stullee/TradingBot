@@ -143,6 +143,20 @@ symbol per poll interval, and one Anthropic API call per new article seen.
 Keep `news_poll_interval_sec` reasonable (the default is 5 minutes) to avoid
 surprises on both providers' usage/rate limits.
 
+## Backtesting
+
+Before trusting a strategy, it's worth checking whether it has any
+historical edge at all. The repo includes a standalone backtester
+(`python -m tradingbot.backtest.runner`) that replays the configured
+strategy bar-by-bar over historical IB data and prints win rate,
+expectancy (in R-multiples), profit factor, and max drawdown per symbol.
+It never places orders. This add-on doesn't expose it as a UI option (it's
+a one-off analysis tool, not a long-running service) — run it from a shell
+inside the add-on container (Settings → Add-ons → this add-on → Terminal,
+if your HA install has that), or from the repo directly on any machine
+that can reach your IB Gateway, using the same `SYMBOLS`/`MARKETS`/
+`STRATEGY` config as this add-on. See the repo's `README.md` for details.
+
 ## Logs
 
 Live logs are visible in this add-on's **Log** tab. They're also written to

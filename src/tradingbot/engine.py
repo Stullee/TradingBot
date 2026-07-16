@@ -33,11 +33,36 @@ POLL_INTERVAL_SEC = 10
 POLLED_BARS_REFRESH_SEC = 60
 
 
+def build_strategy(settings: Settings) -> Strategy:
+    """Constructs the Strategy selected by settings.strategy. Shared by the
+    live engine and the backtester so both run the exact same logic."""
+    if settings.strategy == "ema_rsi_momentum":
+        return EmaRsiVwapMomentum(
+            ema_fast=settings.ema_fast,
+            ema_slow=settings.ema_slow,
+            rsi_period=settings.rsi_period,
+            rsi_long_min=settings.rsi_long_min,
+            rsi_long_max=settings.rsi_long_max,
+            rsi_short_min=settings.rsi_short_min,
+            rsi_short_max=settings.rsi_short_max,
+            atr_period=settings.atr_period,
+            allow_shorting=settings.allow_shorting,
+        )
+    return VwapMeanReversion(
+        rsi_period=settings.rsi_period,
+        rsi_oversold=settings.rsi_oversold,
+        rsi_overbought=settings.rsi_overbought,
+        atr_period=settings.atr_period,
+        vwap_dist_atr_mult=settings.vwap_dist_atr_mult,
+        allow_shorting=settings.allow_shorting,
+    )
+
+
 class TradingEngine:
     def __init__(self, settings: Settings, strategy: Strategy | None = None):
         self.settings = settings
         self.broker = BrokerConnection(settings)
-        self.strategy = strategy or self._build_default_strategy(settings)
+        self.strategy = strategy or build_strategy(settings)
         self.risk = RiskManager(
             risk_per_trade_pct=settings.risk_per_trade_pct,
             max_daily_loss_pct=settings.max_daily_loss_pct,
@@ -65,29 +90,6 @@ class TradingEngine:
         }
         self._flattened_today: dict[str, bool] = {m: False for m in self.symbols_by_market}
         self._last_polled_refresh = 0.0
-
-    @staticmethod
-    def _build_default_strategy(settings: Settings) -> Strategy:
-        if settings.strategy == "ema_rsi_momentum":
-            return EmaRsiVwapMomentum(
-                ema_fast=settings.ema_fast,
-                ema_slow=settings.ema_slow,
-                rsi_period=settings.rsi_period,
-                rsi_long_min=settings.rsi_long_min,
-                rsi_long_max=settings.rsi_long_max,
-                rsi_short_min=settings.rsi_short_min,
-                rsi_short_max=settings.rsi_short_max,
-                atr_period=settings.atr_period,
-                allow_shorting=settings.allow_shorting,
-            )
-        return VwapMeanReversion(
-            rsi_period=settings.rsi_period,
-            rsi_oversold=settings.rsi_oversold,
-            rsi_overbought=settings.rsi_overbought,
-            atr_period=settings.atr_period,
-            vwap_dist_atr_mult=settings.vwap_dist_atr_mult,
-            allow_shorting=settings.allow_shorting,
-        )
 
     async def start(self) -> None:
         await self.broker.connect_with_retry()

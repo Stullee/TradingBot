@@ -15,6 +15,26 @@ from ib_async import IB, Contract
 log = logging.getLogger(__name__)
 
 
+def bars_to_dataframe(bars) -> pd.DataFrame:
+    """Converts an ib_async BarDataList (or any list of objects with
+    date/open/high/low/close/volume) into a sorted, tz-aware OHLCV DataFrame."""
+    df = pd.DataFrame(
+        {
+            "date": [b.date for b in bars],
+            "open": [b.open for b in bars],
+            "high": [b.high for b in bars],
+            "low": [b.low for b in bars],
+            "close": [b.close for b in bars],
+            "volume": [b.volume for b in bars],
+        }
+    )
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"], utc=True)
+    df = df.set_index("date").sort_index()
+    return df
+
+
 class BarStream:
     """Keeps one historical bar list (today's session) per symbol."""
 
@@ -95,21 +115,7 @@ class BarStream:
         bars = self._bar_lists.get(symbol)
         if not bars:
             return None
-        df = pd.DataFrame(
-            {
-                "date": [b.date for b in bars],
-                "open": [b.open for b in bars],
-                "high": [b.high for b in bars],
-                "low": [b.low for b in bars],
-                "close": [b.close for b in bars],
-                "volume": [b.volume for b in bars],
-            }
-        )
-        if df.empty:
-            return df
-        df["date"] = pd.to_datetime(df["date"], utc=True)
-        df = df.set_index("date").sort_index()
-        return df
+        return bars_to_dataframe(bars)
 
     def unsubscribe_all(self) -> None:
         for bars in self._bar_lists.values():

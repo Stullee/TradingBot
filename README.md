@@ -157,6 +157,37 @@ The bot logs to both the console and `logs/tradingbot.log` (rotating). It
 runs continuously; stop it with `Ctrl+C` — on shutdown it flattens any open
 positions before disconnecting.
 
+## Backtesting
+
+Before trusting a strategy with real (or even paper) money, check whether
+it has any historical edge at all:
+
+```bash
+source .venv/bin/activate
+python -m tradingbot.backtest.runner
+```
+
+Requires TWS/IB Gateway running (it only requests historical data, never
+places orders, and connects with a different client id so it can run
+alongside a live/paper session). Uses the same `SYMBOLS`/`MARKETS`,
+`STRATEGY`, and strategy/risk parameters as live trading, plus
+`BACKTEST_DURATION` (an IB duration string, e.g. `60 D`, `6 M`, `1 Y`) for
+how far back to pull.
+
+It replays the configured strategy bar-by-bar over that history — one
+position at a time per symbol, same ATR-based stop/target bracket sizing
+as live trading — and prints per-symbol and pooled-aggregate stats in
+R-multiples (P&L in units of initial risk, so it's comparable across
+symbols regardless of price): win rate, average R (expectancy), profit
+factor, max drawdown, and longest losing streak.
+
+**Read this before trusting the output:** this is a quick signal, not
+proof. It doesn't model slippage or commissions, assumes fills exactly at
+the stop/target price (real fills can gap past them), and a good-looking
+backtest can still be overfit to that particular historical window. See
+`src/tradingbot/backtest/stats.py`'s docstring for what "Sharpe" means
+here (a per-trade R-multiple proxy, not an annualized equity-curve Sharpe).
+
 ## Running the tests
 
 ```bash

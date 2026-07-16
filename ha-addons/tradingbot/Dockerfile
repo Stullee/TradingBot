@@ -23,6 +23,8 @@ RUN pip install --no-cache-dir \
     "tradingbot @ git+https://github.com/Stullee/TradingBot.git@${TRADINGBOT_COMMIT}"
 
 WORKDIR /app
+COPY _addon_options.py /app/_addon_options.py
 COPY addon_entrypoint.py /app/addon_entrypoint.py
+COPY addon_backtest_entrypoint.py /app/addon_backtest_entrypoint.py
 
 CMD ["python", "addon_entrypoint.py"]

@@ -146,16 +146,26 @@ surprises on both providers' usage/rate limits.
 ## Backtesting
 
 Before trusting a strategy, it's worth checking whether it has any
-historical edge at all. The repo includes a standalone backtester
-(`python -m tradingbot.backtest.runner`) that replays the configured
-strategy bar-by-bar over historical IB data and prints win rate,
-expectancy (in R-multiples), profit factor, and max drawdown per symbol.
-It never places orders. This add-on doesn't expose it as a UI option (it's
-a one-off analysis tool, not a long-running service) — run it from a shell
-inside the add-on container (Settings → Add-ons → this add-on → Terminal,
-if your HA install has that), or from the repo directly on any machine
-that can reach your IB Gateway, using the same `SYMBOLS`/`MARKETS`/
-`STRATEGY` config as this add-on. See the repo's `README.md` for details.
+historical edge at all. The repo includes a standalone backtester that
+replays the configured strategy bar-by-bar over historical IB data and
+prints win rate, expectancy (in R-multiples), profit factor, and max
+drawdown per symbol. It never places orders.
+
+This add-on doesn't expose it as a UI option (it's a one-off analysis
+tool, not a long-running service) — run it as a one-off command inside
+the already-running add-on container instead, using its own SYMBOLS/
+MARKETS/STRATEGY config automatically (no separate `.env` needed):
+
+```bash
+docker ps                 # find the container name, e.g. addon_local_tradingbot
+docker exec -it <container-name> python addon_backtest_entrypoint.py
+```
+
+If your HA install doesn't give you host shell access (e.g. no SSH/Terminal
+add-on), run it from a clone of the repo on any machine that can reach your
+IB Gateway instead: `pip install -e .`, copy your `.env`, then
+`python -m tradingbot.backtest.runner`. See the repo's `README.md` for
+details.
 
 ## Logs
 

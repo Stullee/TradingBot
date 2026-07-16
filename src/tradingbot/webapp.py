@@ -127,7 +127,7 @@ function renderOpenShadowTrades(trades) {
     var rText = (r === null || r === undefined) ? "-" : (r >= 0 ? "+" : "") + fmt(r, 2) + "R";
     return "<tr><td>" + t.symbol + "</td><td>" + badge(t.direction) + "</td><td>" +
       fmt(t.entry_price, 2) + "</td><td>" + (t.last_price !== null && t.last_price !== undefined ? fmt(t.last_price, 2) : "-") +
-      "</td><td class=\"" + cls(r) + "\">" + rText + "</td><td>" +
+      "</td><td class=\\"" + cls(r) + "\\">" + rText + "</td><td>" +
       fmt(t.stop_price, 2) + "</td><td>" + fmt(t.target_price, 2) + "</td><td>" +
       fmt(t.confidence, 2) + "</td><td>" +
       (t.opened_at || "").slice(11, 19) + "</td><td>" + (t.headline || "") + "</td></tr>";

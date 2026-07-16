@@ -1,11 +1,15 @@
 import asyncio
+import re
+import shutil
+import subprocess
 from types import SimpleNamespace
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from tradingbot.news.shadow_trade import ShadowTrade
 from tradingbot.status import AccountStatus, PositionStatus
-from tradingbot.webapp import create_app
+from tradingbot.webapp import _INDEX_HTML, create_app
 
 
 class StubBroker:
@@ -42,6 +46,34 @@ def test_index_serves_html(tmp_path):
             await client.close()
 
     run(scenario())
+
+
+def test_dashboard_script_is_syntactically_valid_js(tmp_path):
+    """A previous revision had a mismatched quote-escape (\\" written as just
+    \\", missing a backslash) inside one template string in _INDEX_HTML --
+    valid Python, but it broke the JS string literal and threw a
+    SyntaxError the instant the browser tried to parse the page's <script>
+    block. That failure is invisible to every other test here (they only
+    check the served HTML contains expected substrings, never that the
+    script actually runs) and to a human eye scanning a wall of escaped
+    HTML-in-JS-in-Python -- the dashboard just sat on "Loading..." forever
+    with nothing in the server logs, since refresh() and its fetch() call
+    never got a chance to execute at all. This parses the exact JS the
+    server sends on every request, so a repeat of that mistake fails here
+    with a clear "invalid syntax" instead of a silent, hard-to-diagnose
+    blank dashboard in production."""
+    if shutil.which("node") is None:
+        pytest.skip("node not available to check JS syntax")
+
+    match = re.search(r"<script>(.*)</script>", _INDEX_HTML, re.S)
+    assert match, "expected exactly one <script> block in the dashboard page"
+
+    script_path = tmp_path / "dashboard.js"
+    script_path.write_text(match.group(1))
+    result = subprocess.run(
+        ["node", "--check", str(script_path)], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_status_endpoint_returns_expected_json_shape(tmp_path, monkeypatch):

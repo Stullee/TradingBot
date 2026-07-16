@@ -133,7 +133,16 @@ class NewsMonitor:
         await self._poll_news()
 
     def _update_open_shadow_trades(self) -> None:
+        """Skips a symbol entirely while its market is closed, not just the
+        stop/target check -- shadow.update()'s max-hold timeout is wall-clock
+        based, so calling it with the market's last (frozen, hours-stale)
+        close price would fabricate a TIMEOUT close at some arbitrary point
+        overnight using a price nothing actually traded at. Skipping the call
+        outright defers that check to the market's next real, fresh price
+        instead of manufacturing an exit against a stale one."""
         for symbol in self.settings.symbol_list:
+            if not self._is_market_open(symbol):
+                continue
             df = self.bars.dataframe(symbol)
             if df is None or df.empty:
                 continue

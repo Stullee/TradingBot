@@ -3,6 +3,8 @@ import json
 import time
 from types import SimpleNamespace
 
+import pandas as pd
+
 from tradingbot.news.monitor import NewsMonitor
 from tradingbot.news.sentiment import NewsAssessment
 
@@ -237,6 +239,53 @@ def test_market_open_check_defaults_to_always_open(tmp_path):
     asyncio.run(monitor._poll_news())
 
     assert len(fake_analyzer.calls) == 1
+
+
+class FakeBars:
+    def __init__(self, closes: dict[str, float]):
+        self.closes = closes
+
+    def dataframe(self, symbol):
+        if symbol not in self.closes:
+            return None
+        return pd.DataFrame({"close": [self.closes[symbol]]})
+
+
+class FakeShadowUpdateTracker:
+    def __init__(self):
+        self.update_calls: list[tuple[str, float]] = []
+
+    def update(self, symbol, price):
+        self.update_calls.append((symbol, price))
+
+
+def test_open_shadow_trades_are_not_updated_while_market_is_closed(tmp_path):
+    """The bug this guards against: shadow.update()'s max-hold timeout is
+    wall-clock based, so calling it overnight with the market's last
+    (frozen) close price would fabricate a TIMEOUT close using a price
+    nothing actually traded at -- confirmed as the same class of bug as the
+    entry-side stale-price shadow trade this fix's sibling addressed."""
+    settings = make_settings(tmp_path, symbol_list=["ASML"])
+    monitor = NewsMonitor(
+        settings, bars=FakeBars({"ASML": 700.0}), is_market_open=lambda symbol: False
+    )
+    monitor.shadow = FakeShadowUpdateTracker()
+
+    monitor._update_open_shadow_trades()
+
+    assert monitor.shadow.update_calls == []
+
+
+def test_open_shadow_trades_are_updated_while_market_is_open(tmp_path):
+    settings = make_settings(tmp_path, symbol_list=["AAPL"])
+    monitor = NewsMonitor(
+        settings, bars=FakeBars({"AAPL": 200.0}), is_market_open=lambda symbol: True
+    )
+    monitor.shadow = FakeShadowUpdateTracker()
+
+    monitor._update_open_shadow_trades()
+
+    assert monitor.shadow.update_calls == [("AAPL", 200.0)]
 
 
 def test_poll_completion_is_always_logged_even_with_nothing_new(tmp_path, caplog):

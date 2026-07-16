@@ -93,7 +93,7 @@ symbol uses that market's default exchange/currency; append
 
 | Market | Default exchange/currency | Session |
 |---|---|---|
-| `US` | SMART / USD | ~4:00–20:00 ET (includes pre/post-market) |
+| `US` | SMART / USD | 9:30–16:00 ET (regular hours only) |
 | `EU` | IBIS (Xetra) / EUR | 9:00–17:30 CET |
 | `ASIA` | SEHK (Hong Kong) / HKD | 9:30–16:00 HKT |
 | `CRYPTO` | PAXOS / USD | 24/7, daily 23:55 UTC flatten checkpoint |
@@ -114,8 +114,6 @@ to round-the-clock weekday coverage with brief gaps, not literal 24/7.
   ZEROHASHE, not ZEROHASH; try `@EUR` if `@USD` doesn't qualify).
 - Cross-currency position sizing needs live IB market data access to the
   relevant FX pair.
-- US extended hours have materially thinner liquidity/wider spreads than the
-  regular session.
 - Hong Kong's midday trading halt (~12:00–13:00 HKT) isn't modeled; orders
   simply won't fill until the exchange resumes trading.
 

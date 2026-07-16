@@ -37,9 +37,16 @@ BUILTIN_MARKETS: dict[str, MarketPreset] = {
         currency="USD",
         security_type="STK",
         timezone="US/Eastern",
-        open_time="04:00",
-        close_time="20:00",
-        outside_rth=True,
+        # Regular trading hours only (9:30am-4pm ET) -- pre/post-market was
+        # tried (outside_rth=True, 4am-8pm ET) but confirmed live to be where
+        # the ~20min stale-bar lag consistently showed up: thin after-hours
+        # liquidity means a "new" 5-min bar can genuinely take that long to
+        # close, which useRTH=True historical data + regular-hours-only
+        # is_open() now sidesteps entirely rather than fighting with a
+        # bigger staleness threshold.
+        open_time="09:30",
+        close_time="16:00",
+        outside_rth=False,
     ),
     "EU": MarketPreset(
         name="EU",

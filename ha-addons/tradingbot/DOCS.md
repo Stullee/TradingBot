@@ -126,7 +126,7 @@ to change exchange/currency/session defaults):
 
 | Market | Default exchange/currency | Session |
 |---|---|---|
-| `US` | SMART / USD | ~4:00–20:00 ET (includes pre/post-market) |
+| `US` | SMART / USD | 9:30–16:00 ET (regular hours only) |
 | `EU` | IBIS (Xetra) / EUR | 9:00–17:30 CET |
 | `ASIA` | SEHK (Hong Kong) / HKD | 9:30–16:00 HKT |
 | `CRYPTO` | PAXOS / USD | 24/7, with a daily 23:55 UTC flatten checkpoint |

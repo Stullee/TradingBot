@@ -12,8 +12,21 @@ Entry logic (evaluated on each new closed bar):
 VWAP deviations of this kind occur many times per session (not just at
 trend turns), so this fires far more often than a trend-following EMA
 crossover -- see tradingbot.strategy.ema_rsi_momentum for that alternative.
-Trade-off: smaller average win per trade, and it can fight a strong trend
-on a genuinely trending day.
+Trade-off: smaller average win per trade, and pure countertrend
+mean-reversion can fight a strong trend on a genuinely trending day (buying
+a dip in a downtrend, or shorting an extension in an uptrend) -- exactly
+the setups where this strategy loses most, confirmed both in backtests
+(persistently trending names like TSLA/MSFT were the worst performers) and
+live (shorting WMT during a sustained intraday uptrend).
+
+Trend filter (on by default, `trend_ema_period`): entries are only allowed
+in the direction that doesn't fight a longer-horizon trend -- LONG (buy the
+dip) is blocked while price is below the trend EMA (a downtrend), SHORT
+(sell the rip) is blocked while price is above it (an uptrend). This keeps
+the "buy dips / sell rips" mean-reversion timing but only *with* the
+prevailing trend, not against it -- turns the strategy from pure
+countertrend into trend-following-with-pullback-entries. Set
+`trend_ema_period=0` to disable and get the old unconditional behavior.
 """
 from __future__ import annotations
 
@@ -30,6 +43,7 @@ class VwapMeanReversion(Strategy):
         rsi_overbought: float,
         atr_period: int,
         vwap_dist_atr_mult: float,
+        trend_ema_period: int = 50,
         allow_shorting: bool = False,
     ):
         self.rsi_period = rsi_period
@@ -37,11 +51,15 @@ class VwapMeanReversion(Strategy):
         self.rsi_overbought = rsi_overbought
         self.atr_period = atr_period
         self.vwap_dist_atr_mult = vwap_dist_atr_mult
+        self.trend_ema_period = trend_ema_period
         self.allow_shorting = allow_shorting
 
     @property
     def min_bars(self) -> int:
-        return max(self.rsi_period, self.atr_period) + 2
+        periods = [self.rsi_period, self.atr_period]
+        if self.trend_ema_period > 0:
+            periods.append(self.trend_ema_period)
+        return max(periods) + 2
 
     def generate_signal(self, df: pd.DataFrame) -> Signal:
         if len(df) < self.min_bars:
@@ -53,8 +71,14 @@ class VwapMeanReversion(Strategy):
         dist = curr["close"] - curr["vwap"]
         threshold = curr["atr"] * self.vwap_dist_atr_mult
 
+        # Trend filter disabled (trend_ema_period=0) -> never blocks either
+        # direction, reproducing the old unconditional countertrend behavior.
+        blocked_for_long = self.trend_ema_period > 0 and curr["close"] < curr["trend_ema"]
+        blocked_for_short = self.trend_ema_period > 0 and curr["close"] > curr["trend_ema"]
+
         if (
-            dist <= -threshold
+            not blocked_for_long
+            and dist <= -threshold
             and curr["rsi"] <= self.rsi_oversold
             and curr["close"] > prev["close"]
         ):
@@ -62,6 +86,7 @@ class VwapMeanReversion(Strategy):
 
         if (
             self.allow_shorting
+            and not blocked_for_short
             and dist >= threshold
             and curr["rsi"] >= self.rsi_overbought
             and curr["close"] < prev["close"]

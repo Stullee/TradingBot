@@ -39,6 +39,7 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `rsi_long_min/max`, `rsi_short_min/max` | RSI entry filter bands (used by `ema_rsi_momentum` only) |
 | `rsi_oversold` / `rsi_overbought` | RSI extremes required for an entry (used by `vwap_mean_reversion` only) |
 | `vwap_dist_atr_mult` | How far price must have drifted from VWAP, in ATR multiples, to trigger a mean-reversion entry (used by `vwap_mean_reversion` only) |
+| `trend_ema_period` | Trend filter EMA period (used by `vwap_mean_reversion` only) — blocks LONG entries in a downtrend and SHORT entries in an uptrend, so dip-buys/rip-sells only fire with the prevailing trend, not against it. Set to `0` to disable and get the old unconditional countertrend behavior |
 | `atr_period`, `stop_atr_mult`, `target_atr_mult` | ATR-based stop-loss/take-profit distances |
 | `allow_shorting` | Enable short entries (disabled by default) |
 | `risk_per_trade_pct` | % of account equity risked per trade (stop-distance based) |
@@ -227,6 +228,23 @@ add-on), run it from a clone of the repo on any machine that can reach your
 IB Gateway instead: `pip install -e .`, copy your `.env`, then
 `python -m tradingbot.backtest.runner`. See the repo's `README.md` for
 details.
+
+### Trend-filter before/after comparison
+
+A second one-off tool answers a narrower question specifically for
+`vwap_mean_reversion`'s trend filter (`trend_ema_period`): does it actually
+help, and does that hold up on data it wasn't looked at while deciding on
+it? It fetches the same history once per symbol, then runs both the filter
+on and the filter off over a chronological train/validation split (70/30,
+validation = the more recent slice) and prints both configurations' stats
+side by side for both slices. A filter that only wins on the train slice is
+a sign it's tuned to that window rather than a real edge.
+
+```bash
+docker exec -it <container-name> python addon_compare_entrypoint.py
+```
+
+Or standalone: `python -m tradingbot.backtest.compare_runner`.
 
 ## Logs
 

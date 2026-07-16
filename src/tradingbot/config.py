@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     rsi_oversold: float = 30
     rsi_overbought: float = 70
     vwap_dist_atr_mult: float = 0.5
+    # Trend filter for vwap_mean_reversion (ignored by ema_rsi_momentum):
+    # blocks LONG entries while price is below this EMA (a downtrend) and
+    # SHORT entries while price is above it (an uptrend) -- keeps the
+    # "buy dips / sell rips" mean-reversion timing but only with the
+    # prevailing trend, not against it. Set to 0 to disable (old
+    # unconditional countertrend behavior).
+    trend_ema_period: int = 50
     atr_period: int = 14
     stop_atr_mult: float = 1.5
     target_atr_mult: float = 2.5

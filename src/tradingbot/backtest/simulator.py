@@ -69,13 +69,33 @@ def simulate(
     stop_atr_mult: float,
     target_atr_mult: float,
     vwap_tz: str = "US/Eastern",
+    trend_ema_period: int = 50,
 ) -> list[Trade]:
     """Runs `strategy` bar-by-bar over historical OHLCV `df` (must have a
     sorted, tz-aware DatetimeIndex and open/high/low/close/volume columns).
     Returns only fully closed round-trip trades -- a position still open at
     the end of the data is dropped rather than force-closed, since it never
     completed and would bias the stats."""
-    enriched = add_indicators(df, ema_fast, ema_slow, rsi_period, atr_period, vwap_tz)
+    enriched = add_indicators(
+        df, ema_fast, ema_slow, rsi_period, atr_period, vwap_tz, trend_ema_period
+    )
+    return simulate_enriched(enriched, strategy, symbol, stop_atr_mult, target_atr_mult)
+
+
+def simulate_enriched(
+    enriched: pd.DataFrame,
+    strategy: Strategy,
+    symbol: str,
+    stop_atr_mult: float,
+    target_atr_mult: float,
+) -> list[Trade]:
+    """Same trade-loop as `simulate()`, but takes an already-indicator-enriched
+    frame (see `add_indicators`) instead of computing it internally. Lets a
+    caller compute indicators once over a symbol's full history and then
+    re-run the loop over different slices/strategy variants of that same
+    frame -- e.g. a train/validation split, or comparing strategy variants
+    that only differ in entry logic -- without recomputing EMA/RSI/ATR/VWAP
+    (which need the full history for an accurate warm-up) once per slice."""
     min_bars = strategy.min_bars
 
     trades: list[Trade] = []

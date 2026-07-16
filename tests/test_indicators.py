@@ -87,6 +87,17 @@ def test_vwap_does_not_reset_mid_session_for_non_us_timezone():
 def test_add_indicators_adds_expected_columns():
     df = make_ohlcv()
     out = add_indicators(df, ema_fast=5, ema_slow=20, rsi_period=14, atr_period=14)
-    for col in ["ema_fast", "ema_slow", "rsi", "atr", "vwap"]:
+    for col in ["ema_fast", "ema_slow", "rsi", "atr", "vwap", "trend_ema"]:
         assert col in out.columns
     assert len(out) == len(df)
+
+
+def test_add_indicators_omits_trend_ema_when_disabled():
+    # trend_ema_period=0 is the documented way to disable the trend filter;
+    # ewm(span=0) itself raises, so the column must be skipped rather than
+    # computed with an invalid span.
+    df = make_ohlcv()
+    out = add_indicators(
+        df, ema_fast=5, ema_slow=20, rsi_period=14, atr_period=14, trend_ema_period=0
+    )
+    assert "trend_ema" not in out.columns

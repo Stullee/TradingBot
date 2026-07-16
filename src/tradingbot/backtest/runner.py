@@ -85,6 +85,7 @@ async def _process_symbol(
         settings.stop_atr_mult,
         settings.target_atr_mult,
         vwap_tz=preset.timezone,
+        trend_ema_period=settings.trend_ema_period,
     )
     s = summarize(trades)
     pf = "inf" if s.profit_factor == float("inf") else f"{s.profit_factor:.2f}"

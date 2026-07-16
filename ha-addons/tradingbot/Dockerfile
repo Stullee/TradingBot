@@ -34,6 +34,7 @@ WORKDIR /app
 COPY _addon_options.py /app/_addon_options.py
 COPY addon_entrypoint.py /app/addon_entrypoint.py
 COPY addon_backtest_entrypoint.py /app/addon_backtest_entrypoint.py
+COPY addon_compare_entrypoint.py /app/addon_compare_entrypoint.py
 COPY addon_report_entrypoint.py /app/addon_report_entrypoint.py
 
 CMD ["python", "addon_entrypoint.py"]

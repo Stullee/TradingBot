@@ -38,6 +38,7 @@ options:
   rsi_oversold: 30
   rsi_overbought: 70
   vwap_dist_atr_mult: 0.5
+  trend_ema_period: 50
   atr_period: 14
   stop_atr_mult: 1.5
   target_atr_mult: 2.5
@@ -77,6 +78,7 @@ schema:
   rsi_oversold: float(0,100)
   rsi_overbought: float(0,100)
   vwap_dist_atr_mult: float(0.05,10)
+  trend_ema_period: int(0,500)
   atr_period: int(2,100)
   stop_atr_mult: float(0.1,20)
   target_atr_mult: float(0.1,20)

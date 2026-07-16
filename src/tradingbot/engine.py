@@ -63,6 +63,7 @@ def build_strategy(settings: Settings) -> Strategy:
         rsi_overbought=settings.rsi_overbought,
         atr_period=settings.atr_period,
         vwap_dist_atr_mult=settings.vwap_dist_atr_mult,
+        trend_ema_period=settings.trend_ema_period,
         allow_shorting=settings.allow_shorting,
     )
 
@@ -340,6 +341,7 @@ class TradingEngine:
             self.settings.rsi_period,
             self.settings.atr_period,
             vwap_tz=BUILTIN_MARKETS[spec.market].timezone,
+            trend_ema_period=self.settings.trend_ema_period,
         )
 
         position_qty = self._position_qty(contract)

@@ -211,6 +211,24 @@ backtest can still be overfit to that particular historical window. See
 `src/tradingbot/backtest/stats.py`'s docstring for what "Sharpe" means
 here (a per-trade R-multiple proxy, not an annualized equity-curve Sharpe).
 
+### Trend-filter before/after comparison
+
+`vwap_mean_reversion`'s trend filter (`TREND_EMA_PERIOD`, see below) has
+its own comparison tool, since "does this specific parameter help" needs a
+train/validation split to answer honestly rather than just eyeballing one
+run:
+
+```bash
+python -m tradingbot.backtest.compare_runner
+```
+
+Fetches history once per symbol (same `BACKTEST_DURATION`), then runs the
+filter on and off over a chronological 70/30 train/validation split
+(validation = the more recent slice) and prints both configurations' stats
+side by side for both slices. A filter that only wins on the train slice
+and not on validation is a sign it's tuned to that window rather than a
+real, generalizing edge.
+
 ## Running the tests
 
 ```bash

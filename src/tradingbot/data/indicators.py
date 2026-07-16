@@ -53,6 +53,7 @@ def add_indicators(
     rsi_period: int,
     atr_period: int,
     vwap_tz: str = "US/Eastern",
+    trend_ema_period: int = 50,
 ) -> pd.DataFrame:
     out = df.copy()
     out["ema_fast"] = ema(out["close"], ema_fast)
@@ -60,4 +61,11 @@ def add_indicators(
     out["rsi"] = rsi(out["close"], rsi_period)
     out["atr"] = atr(out, atr_period)
     out["vwap"] = session_vwap(out, vwap_tz)
+    # A longer-horizon trend reference, independent of ema_fast/ema_slow
+    # (which are tuned for short-term crossover signals). Used by
+    # VwapMeanReversion as a trend filter -- see that class's docstring.
+    # trend_ema_period<=0 means the filter is disabled and the column is
+    # never read, but ewm(span=0) itself raises, so skip computing it.
+    if trend_ema_period > 0:
+        out["trend_ema"] = ema(out["close"], trend_ema_period)
     return out

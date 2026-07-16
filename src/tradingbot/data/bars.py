@@ -70,17 +70,6 @@ class BarStream:
             keepUpToDate=False,
         )
         self._bar_lists[symbol] = bars
-        if bars:
-            last = bars[-1]
-            log.info(
-                "%s: %d bars, latest close=%.2f @ %s",
-                symbol,
-                len(bars),
-                last.close,
-                last.date,
-            )
-        else:
-            log.warning("%s: refresh returned no bars (still no market data?)", symbol)
 
     async def refresh_all_polled(self) -> None:
         for symbol in list(self._polled):
@@ -88,6 +77,19 @@ class BarStream:
                 await self.refresh_polled(symbol)
             except Exception:  # noqa: BLE001 - one bad refresh shouldn't skip the rest
                 log.exception("Failed to refresh polled bars for %s", symbol)
+
+    def log_latest(self, symbol: str) -> None:
+        """Logs the current latest bar for a symbol -- works the same for both
+        live-streamed and polled symbols, since both just populate
+        self._bar_lists. Called periodically from the engine for every
+        symbol, so live-streamed ones (stocks) get the same ongoing
+        "is data actually moving" visibility that polled ones (crypto) do."""
+        bars = self._bar_lists.get(symbol)
+        if not bars:
+            log.warning("%s: no bars yet (still no market data?)", symbol)
+            return
+        last = bars[-1]
+        log.info("%s: %d bars, latest close=%.2f @ %s", symbol, len(bars), last.close, last.date)
 
     def dataframe(self, symbol: str) -> pd.DataFrame | None:
         bars = self._bar_lists.get(symbol)

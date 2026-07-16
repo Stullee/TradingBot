@@ -178,6 +178,8 @@ class TradingEngine:
         if now - self._last_polled_refresh >= POLLED_BARS_REFRESH_SEC:
             self._last_polled_refresh = now
             await self.bars.refresh_all_polled()
+            for symbol in self.contracts:
+                self.bars.log_latest(symbol)
 
         equity = self.broker.account_net_liquidation()
 

@@ -32,9 +32,13 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `allow_live_trading` | Must be `true` to connect to a live-trading port |
 | `symbols` | Simple case: comma-separated US tickers, e.g. `AAPL,MSFT,NVDA` |
 | `markets` | Multi-market DSL, takes priority over `symbols` when set — see below |
+| `strategy` | `vwap_mean_reversion` (default) or `ema_rsi_momentum` — see below |
 | `bar_size` | IB bar size string, e.g. `5 mins` |
-| `ema_fast` / `ema_slow` | EMA crossover periods |
-| `rsi_period`, `rsi_long_min/max`, `rsi_short_min/max` | RSI entry filter bands |
+| `ema_fast` / `ema_slow` | EMA crossover periods (used by `ema_rsi_momentum` only) |
+| `rsi_period` | RSI lookback period (used by both strategies) |
+| `rsi_long_min/max`, `rsi_short_min/max` | RSI entry filter bands (used by `ema_rsi_momentum` only) |
+| `rsi_oversold` / `rsi_overbought` | RSI extremes required for an entry (used by `vwap_mean_reversion` only) |
+| `vwap_dist_atr_mult` | How far price must have drifted from VWAP, in ATR multiples, to trigger a mean-reversion entry (used by `vwap_mean_reversion` only) |
 | `atr_period`, `stop_atr_mult`, `target_atr_mult` | ATR-based stop-loss/take-profit distances |
 | `allow_shorting` | Enable short entries (disabled by default) |
 | `risk_per_trade_pct` | % of account equity risked per trade (stop-distance based) |
@@ -51,6 +55,29 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `news_confidence_threshold` | Minimum model confidence (0-1) required to open a shadow trade |
 | `news_poll_interval_sec` | How often to actually poll for new articles |
 | `news_max_hold_min` | Force-close a shadow trade after this long if neither stop nor target hit |
+
+## Strategy: VWAP mean-reversion vs EMA/RSI momentum
+
+Two pluggable strategies are built in, selected via the `strategy` option:
+
+- **`vwap_mean_reversion`** (default): enters when price has drifted
+  meaningfully below/above the session VWAP (scaled by ATR) *and* RSI
+  confirms an oversold/overbought extreme *and* the current bar shows the
+  first sign of a reversal. Exits once price reverts back to VWAP (or the
+  ATR stop/target bracket is hit first, whichever comes first). This fires
+  many times a session — genuine "many small trades a day" day trading —
+  because VWAP deviations happen constantly, not just at trend turns. Best
+  suited to range-bound/choppy conditions, which is most of a session; it
+  can lose money fighting a strongly trending day.
+- **`ema_rsi_momentum`**: trend-following EMA(fast/slow) crossover, filtered
+  by an RSI band and VWAP side. Only fires at genuine trend turns — a handful
+  of times a session at most — but tends to catch bigger moves when a real
+  trend develops. Exits on the opposite EMA cross.
+
+If you're not seeing enough trades with the momentum strategy, or want a
+higher-frequency, higher-win-rate/smaller-per-trade approach, use the
+default `vwap_mean_reversion`. Switch to `ema_rsi_momentum` if you'd rather
+trade fewer, larger trend moves.
 
 ## Multi-market trading (US / EU / Asia / crypto)
 

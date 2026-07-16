@@ -58,7 +58,7 @@ src/tradingbot/
   broker/connection.py  IB connect/reconnect + multi-asset contract qualification
   data/bars.py           live streaming historical bars per symbol
   data/indicators.py     EMA / RSI / ATR / session VWAP (pure pandas, no IB dependency)
-  strategy/               pluggable Strategy interface + EmaRsiVwapMomentum
+  strategy/               pluggable Strategy interface + VwapMeanReversion (default) / EmaRsiVwapMomentum
   risk/manager.py         position sizing + daily loss kill switch
   execution/order_manager.py  bracket orders + per-market/global flatten
   news/                   news sentiment shadow-trading (see below)

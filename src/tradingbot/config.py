@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     markets: str = ""
 
     # Strategy
+    # "vwap_mean_reversion" (default): fades price back toward VWAP, fires
+    #   often -- many small trades a day, suited to range-bound conditions.
+    # "ema_rsi_momentum": trend-following EMA crossover, fires rarely (only
+    #   at genuine trend turns) -- see strategy/*.py docstrings for details.
+    strategy: str = "vwap_mean_reversion"
     bar_size: str = "5 mins"
     ema_fast: int = 9
     ema_slow: int = 21
@@ -36,6 +41,9 @@ class Settings(BaseSettings):
     rsi_long_max: float = 70
     rsi_short_min: float = 30
     rsi_short_max: float = 50
+    rsi_oversold: float = 30
+    rsi_overbought: float = 70
+    vwap_dist_atr_mult: float = 0.5
     atr_period: int = 14
     stop_atr_mult: float = 1.5
     target_atr_mult: float = 2.5
@@ -65,6 +73,13 @@ class Settings(BaseSettings):
     news_confidence_threshold: float = 0.6
     news_poll_interval_sec: int = 300
     news_max_hold_min: int = 240
+
+    @model_validator(mode="after")
+    def _guard_strategy_name(self) -> "Settings":
+        valid = {"vwap_mean_reversion", "ema_rsi_momentum"}
+        if self.strategy not in valid:
+            raise ValueError(f"STRATEGY must be one of {sorted(valid)}, got {self.strategy!r}")
+        return self
 
     @model_validator(mode="after")
     def _guard_universe_not_empty(self) -> "Settings":

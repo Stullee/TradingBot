@@ -156,3 +156,30 @@ def test_status_endpoint_returns_500_json_on_failure(tmp_path, monkeypatch):
             await client.close()
 
     run(scenario())
+
+
+def test_status_endpoint_times_out_instead_of_hanging_forever(tmp_path, monkeypatch):
+    # A query that never completes must surface as a visible error on the
+    # page, not an indefinite "Loading..." spinner -- confirmed live: the
+    # page itself loaded fine but /api/status never once completed.
+    monkeypatch.setattr("tradingbot.webapp._STATUS_TIMEOUT_SEC", 0.05)
+
+    async def hanging_gather_account_status(broker, include_fills=True):
+        await asyncio.sleep(10)
+        raise AssertionError("should have been cancelled by the timeout")
+
+    monkeypatch.setattr("tradingbot.webapp.gather_account_status", hanging_gather_account_status)
+
+    async def scenario():
+        app = create_app(StubBroker(), make_settings(tmp_path))
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.get("/api/status")
+            assert resp.status == 504
+            data = await resp.json()
+            assert "timed out" in data["error"]
+        finally:
+            await client.close()
+
+    run(scenario())

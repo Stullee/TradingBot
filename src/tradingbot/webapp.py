@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -32,6 +33,13 @@ from tradingbot.status import (
 )
 
 log = logging.getLogger(__name__)
+
+# The dashboard polls every 5s (see _INDEX_HTML's setInterval below) -- a
+# query that hasn't completed by the time the next poll would fire is
+# already indistinguishable from "broken" to whoever's looking at the page,
+# so this fails fast into a visible error instead of leaving the request
+# (and the page) hanging indefinitely.
+_STATUS_TIMEOUT_SEC = 8.0
 
 _INDEX_HTML = """<!doctype html>
 <html>
@@ -257,11 +265,29 @@ def create_app(
         return web.Response(text=_INDEX_HTML, content_type="text/html")
 
     async def handle_status(request: web.Request) -> web.Response:
+        # Logged unconditionally (not just on failure) so a request that
+        # never completes is distinguishable in the logs from one that was
+        # never received at all -- confirmed live: the page loads fine but
+        # /api/status never once shows up in aiohttp's access log, which
+        # only ever logs after a response is sent. A hard timeout also
+        # means a hang shows up as a visible error on the page instead of
+        # an indefinite "Loading..." spinner.
+        log.info("Dashboard: /api/status request received")
+        start = time.monotonic()
         try:
-            data = await _status_payload(broker, settings, latest_signals, news_monitor)
+            data = await asyncio.wait_for(
+                _status_payload(broker, settings, latest_signals, news_monitor),
+                timeout=_STATUS_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            log.warning("Dashboard: /api/status timed out after %.1fs", _STATUS_TIMEOUT_SEC)
+            return web.json_response(
+                {"error": f"Status query timed out after {_STATUS_TIMEOUT_SEC:.0f}s"}, status=504
+            )
         except Exception as exc:  # noqa: BLE001 - never let a bad query 500-loop the page
             log.exception("Dashboard status query failed")
             return web.json_response({"error": str(exc)}, status=500)
+        log.info("Dashboard: /api/status responded in %.2fs", time.monotonic() - start)
         return web.json_response(data)
 
     app = web.Application()

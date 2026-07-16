@@ -35,6 +35,7 @@ class FakeIB:
         self.qualify_calls: list[str] = []
         self.mkt_data_calls: list[str] = []
         self.cancel_calls: list[str] = []
+        self.market_data_type_calls: list[int] = []
 
     async def qualifyContractsAsync(self, contract):
         pair = contract.symbol + contract.currency
@@ -52,6 +53,9 @@ class FakeIB:
 
     def cancelMktData(self, contract):
         self.cancel_calls.append(contract.symbol + contract.currency)
+
+    def reqMarketDataType(self, data_type: int) -> None:
+        self.market_data_type_calls.append(data_type)
 
 
 def run(coro):
@@ -113,6 +117,24 @@ def test_waits_for_first_tick_on_a_freshly_subscribed_pair():
     rate = run(fx.rate("EUR", "USD"))
     assert rate == 1.10
     assert ib.mkt_data_calls == ["EURUSD"]  # still only one subscription
+
+
+def test_subscribing_toggles_delayed_data_only_around_the_reqmktdata_call():
+    # reqMarketDataType is client-wide, not per-request -- it must be
+    # switched to delayed(3) only for the reqMktData call itself (so
+    # accounts without live FX entitlement still get a quote), then
+    # switched straight back to live(1), so it doesn't leave every *other*
+    # subsequent request on the connection (in particular the engine's
+    # keepUpToDate equity bar streams) stuck on delayed data too.
+    ib = FakeIB({"EURUSD": 1.10})
+    fx = fast_fx(ib)
+    run(fx.rate("EUR", "USD"))
+    assert ib.market_data_type_calls == [3, 1]
+
+    # Reusing an already-subscribed pair makes no further reqMktData call,
+    # so it shouldn't touch the market data type setting again either.
+    run(fx.rate("EUR", "USD"))
+    assert ib.market_data_type_calls == [3, 1]
 
 
 def test_unsubscribe_all_cancels_every_open_subscription():

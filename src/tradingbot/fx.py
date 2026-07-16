@@ -61,9 +61,22 @@ class FxConverter:
                 return None
             if qualified is None or not getattr(qualified, "conId", None):
                 return None
-            ticker = self.ib.reqMktData(qualified, "", False, False)
+            # reqMarketDataType is a client-wide setting, not per-request --
+            # switching to delayed(3) only for the moment this subscription
+            # is created (then straight back to live(1)) fixes accounts
+            # without live FX entitlement without leaving every *other*
+            # subsequent request on this connection (in particular the
+            # engine's keepUpToDate equity bar streams) permanently degraded
+            # to delayed too. Confirmed live: leaving delayed mode set
+            # connection-wide made US-equity live bars update only every
+            # 15+ min, mimicking a stalled feed.
+            self.ib.reqMarketDataType(3)
+            try:
+                ticker = self.ib.reqMktData(qualified, "", False, False)
+            finally:
+                self.ib.reqMarketDataType(1)
             self._tickers[pair] = ticker
-            log.info("Subscribed to live FX quotes for %s", pair)
+            log.info("Subscribed to live/delayed FX quotes for %s", pair)
 
         price = ticker.midpoint()
         if price and price == price:

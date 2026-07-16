@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # Risk
     risk_per_trade_pct: float = 0.5
     max_daily_loss_pct: float = 2.0
-    max_concurrent_positions: int = 3
+    max_concurrent_positions: int = 10
     max_position_pct: float = 20.0
 
     # Trading hours: each market's own session times come from the built-in

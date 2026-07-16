@@ -56,6 +56,34 @@ def test_vwap_within_session_extremes():
     assert v.max() <= df["high"].max()
 
 
+def test_vwap_does_not_reset_mid_session_for_non_us_timezone():
+    # Hong Kong's 9:30-16:00 HKT session is ~20:30-03:00 US/Eastern -- it
+    # crosses US/Eastern midnight even though it's a single HKT session.
+    # Grouping VWAP by the wrong (US/Eastern) timezone would spuriously
+    # reset the cumulative VWAP partway through the day; grouping by the
+    # market's own timezone (Asia/Hong_Kong here) must not.
+    idx = pd.date_range("2024-01-02 01:30", periods=10, freq="30min", tz="UTC")
+    close = pd.Series(np.linspace(100, 110, 10), index=idx)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1,
+            "low": close - 1,
+            "close": close,
+            "volume": pd.Series(1000, index=idx),
+        }
+    )
+    # Bar 7 (05:00 UTC) is the first bar past US/Eastern midnight, but still
+    # mid-session in Hong Kong time (13:00 HKT).
+    bar7_typical = (df["high"].iloc[7] + df["low"].iloc[7] + df["close"].iloc[7]) / 3
+
+    v_et = session_vwap(df, tz="US/Eastern")
+    assert v_et.iloc[7] == bar7_typical  # wrong tz: spuriously reset here
+
+    v_hkt = session_vwap(df, tz="Asia/Hong_Kong")
+    assert v_hkt.iloc[7] != bar7_typical  # correct tz: still one continuous session
+
+
 def test_add_indicators_adds_expected_columns():
     df = make_ohlcv()
     out = add_indicators(df, ema_fast=5, ema_slow=20, rsi_period=14, atr_period=14)

@@ -41,7 +41,7 @@ options:
   allow_shorting: false
   risk_per_trade_pct: 0.5
   max_daily_loss_pct: 2.0
-  max_concurrent_positions: 3
+  max_concurrent_positions: 10
   max_position_pct: 20
   no_new_entries_before_close_min: 15
   flatten_before_close_min: 5

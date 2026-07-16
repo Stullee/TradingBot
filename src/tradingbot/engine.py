@@ -240,6 +240,7 @@ class TradingEngine:
         outside_rth: bool,
     ) -> None:
         contract = self.contracts[symbol]
+        spec = self.spec_by_symbol[symbol]
         df = self.bars.dataframe(symbol)
         if df is None or df.empty:
             return
@@ -259,6 +260,7 @@ class TradingEngine:
             self.settings.ema_slow,
             self.settings.rsi_period,
             self.settings.atr_period,
+            vwap_tz=BUILTIN_MARKETS[spec.market].timezone,
         )
 
         position_qty = self._position_qty(contract)
@@ -303,7 +305,6 @@ class TradingEngine:
             target_price = entry_price - target_dist
             action = "SELL"
 
-        spec = self.spec_by_symbol[symbol]
         equity_local = (
             await self.fx.convert(equity, self.base_currency, spec.currency)
             if spec.currency != self.base_currency

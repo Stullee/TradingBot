@@ -63,9 +63,11 @@ BUILTIN_MARKETS: dict[str, MarketPreset] = {
         name="CRYPTO",
         # PAXOS is IB's crypto venue for US-regulated (IBKR LLC) accounts. EU
         # accounts (IBKR Ireland/EEA "Europe - Crypto-Assets" trading
-        # permission) trade crypto via Zero Hash instead -- override per
-        # symbol if that's you, e.g. "CRYPTO:BTC@ZEROHASH@USD,ETH@ZEROHASH@USD"
-        # (try @EUR instead of @USD if that fails to qualify).
+        # permission) trade crypto via Zero Hash instead, confirmed against a
+        # real account under the exchange code ZEROHASHE (not ZEROHASH) --
+        # override per symbol if that's you, e.g.
+        # "CRYPTO:BTC@ZEROHASHE@USD,ETH@ZEROHASHE@USD" (try @EUR instead of
+        # @USD if that fails to qualify).
         exchange="PAXOS",
         currency="USD",
         security_type="CRYPTO",

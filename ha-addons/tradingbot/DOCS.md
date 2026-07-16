@@ -87,7 +87,8 @@ open. Only crypto trades continuously.
   account. The default `PAXOS` venue is for US-regulated (IBKR LLC)
   accounts; EU accounts (IBKR Ireland/EEA "Europe - Crypto-Assets"
   permission) trade crypto via Zero Hash instead -- override per symbol,
-  e.g. `CRYPTO:BTC@ZEROHASH@USD` (try `@EUR` if `@USD` doesn't qualify).
+  e.g. `CRYPTO:BTC@ZEROHASHE@USD` (confirmed against a real account under
+  ZEROHASHE, not ZEROHASH; try `@EUR` if `@USD` doesn't qualify).
 - Position sizing across currencies uses a live FX rate fetched from IB to
   convert your account's base-currency risk budget into each symbol's local
   currency — this needs IB market data access to the relevant FX pair.

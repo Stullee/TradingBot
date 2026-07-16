@@ -26,6 +26,7 @@ from tradingbot.strategy.base import Signal, Strategy
 from tradingbot.strategy.ema_rsi_momentum import EmaRsiVwapMomentum
 from tradingbot.strategy.vwap_mean_reversion import VwapMeanReversion
 from tradingbot.symbols import SymbolSpec
+from tradingbot.webapp import run_dashboard
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +91,15 @@ class TradingEngine:
         }
         self._flattened_today: dict[str, bool] = {m: False for m in self.symbols_by_market}
         self._last_polled_refresh = 0.0
+        self._dashboard_task: asyncio.Task | None = None
+
+    async def _run_dashboard_safely(self) -> None:
+        try:
+            await run_dashboard(self.broker, self.settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a dashboard failure must never take down trading
+            log.exception("Status dashboard failed to start or crashed; trading continues.")
 
     async def start(self) -> None:
         await self.broker.connect_with_retry()
@@ -143,6 +153,9 @@ class TradingEngine:
             self.news_monitor = NewsMonitor(self.settings, self.bars)
             log.info("News sentiment shadow-trading enabled (observation only).")
 
+        if self.settings.enable_dashboard:
+            self._dashboard_task = asyncio.create_task(self._run_dashboard_safely())
+
     async def run_forever(self) -> None:
         await self.start()
         log.info(
@@ -167,6 +180,8 @@ class TradingEngine:
             self.orders.flatten_all()
             self.bars.unsubscribe_all()
             self.fx.unsubscribe_all()
+            if self._dashboard_task is not None:
+                self._dashboard_task.cancel()
             self.broker.disconnect()
             if self.news_monitor is not None:
                 await self.news_monitor.aclose()

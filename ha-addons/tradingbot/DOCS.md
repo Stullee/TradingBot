@@ -55,6 +55,24 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `news_confidence_threshold` | Minimum model confidence (0-1) required to open a shadow trade |
 | `news_poll_interval_sec` | How often to actually poll for new articles |
 | `news_max_hold_min` | Force-close a shadow trade after this long if neither stop nor target hit |
+| `enable_dashboard` | Enable the live status dashboard (see below). Enabled by default |
+
+## Live status dashboard
+
+A read-only web dashboard runs alongside the trading engine (same process,
+no extra setup) showing account equity, open positions with unrealized
+P&L, today's realized P&L per symbol, and the news shadow-trading/analysis
+track record — auto-refreshing every 5 seconds. It never places orders.
+
+It shows up as a **panel in the Home Assistant sidebar** (via Ingress) once
+you rebuild to a version with this feature — look for "TradingBot (IB Day
+Trading)" in the sidebar, not a separate URL. It's also reachable directly
+at `http://<host>:8099/` if you'd rather open it that way. The port is
+fixed at 8099 for the add-on specifically because Home Assistant's Ingress
+routing is configured against that fixed port — if you need a different
+port, that's a standalone/`.env` (`DASHBOARD_PORT`) thing, not something to
+change via the add-on's options. Turn it off entirely with
+`enable_dashboard: false` if you'd rather not run a web server at all.
 
 ## Strategy: VWAP mean-reversion vs EMA/RSI momentum
 

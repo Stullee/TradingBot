@@ -15,6 +15,9 @@ init: true
 startup: application
 boot: manual
 host_network: true
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:chart-line
 options:
   ib_host: "127.0.0.1"
   ib_port: 4002
@@ -53,6 +56,7 @@ options:
   news_confidence_threshold: 0.6
   news_poll_interval_sec: 300
   news_max_hold_min: 240
+  enable_dashboard: true
 schema:
   ib_host: str
   ib_port: port
@@ -91,3 +95,4 @@ schema:
   news_confidence_threshold: float(0,1)
   news_poll_interval_sec: int(60,3600)
   news_max_hold_min: int(5,1440)
+  enable_dashboard: bool

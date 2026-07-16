@@ -62,6 +62,10 @@ src/tradingbot/
   risk/manager.py         position sizing + daily loss kill switch
   execution/order_manager.py  bracket orders + per-market/global flatten
   news/                   news sentiment shadow-trading (see below)
+  status.py               shared status/analytics gathering (IB + persisted logs)
+  report.py                one-shot CLI status report (python -m tradingbot.report)
+  webapp.py                live web dashboard, runs alongside the engine
+  backtest/                bar-by-bar strategy backtester (see below)
   engine.py               orchestrates the whole loop, per market
   main.py                 entry point
 ```
@@ -156,6 +160,23 @@ python -m tradingbot.main
 The bot logs to both the console and `logs/tradingbot.log` (rotating). It
 runs continuously; stop it with `Ctrl+C` — on shutdown it flattens any open
 positions before disconnecting.
+
+## Live status dashboard
+
+A read-only web dashboard (`ENABLE_DASHBOARD=true` by default) runs
+alongside the engine in the same process — no separate command needed.
+Open `http://localhost:8099/` (or `DASHBOARD_PORT`) while the bot is
+running: account equity, open positions with unrealized P&L, today's
+realized P&L per symbol, and news shadow-trading/analysis stats,
+auto-refreshing every 5 seconds. It never places orders. For a one-shot
+CLI version of the same data instead of a live page:
+
+```bash
+python -m tradingbot.report
+```
+
+Connects with a different IB client id than the live engine so both can
+run at once. Also read-only.
 
 ## Backtesting
 

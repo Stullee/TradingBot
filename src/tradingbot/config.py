@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     news_poll_interval_sec: int = 300
     news_max_hold_min: int = 240
 
+    # Live status dashboard (tradingbot.webapp) -- read-only, runs alongside
+    # the trading engine in the same process. Reachable directly at
+    # dashboard_port, and/or as a Home Assistant add-on Ingress tab.
+    enable_dashboard: bool = True
+    dashboard_port: int = 8099
+
     @model_validator(mode="after")
     def _guard_strategy_name(self) -> "Settings":
         valid = {"vwap_mean_reversion", "ema_rsi_momentum"}

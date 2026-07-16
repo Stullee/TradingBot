@@ -30,6 +30,12 @@ class BrokerConnection:
         await self.ib.connectAsync(s.ib_host, s.ib_port, clientId=s.ib_client_id, timeout=15)
         if s.ib_account_id:
             self.ib.reqAccountUpdates(True, s.ib_account_id)
+        # Fall back to delayed data wherever this account lacks a live/real-time
+        # entitlement, instead of silently getting nothing back (this is what
+        # was causing FX ticker lookups -- used for cross-currency position
+        # sizing -- to fail outright on accounts without live FX/crypto data).
+        # Does not downgrade instruments the account *does* have live access to.
+        self.ib.reqMarketDataType(3)
         log.info("Connected. Server version=%s", self.ib.client.serverVersion())
 
     async def connect_with_retry(self, max_delay: int = 60) -> None:

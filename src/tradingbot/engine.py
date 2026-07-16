@@ -41,6 +41,24 @@ STALE_BAR_CHECK_SEC = 60
 # hiccups that silently stop delivering updates (confirmed live: no error
 # logged, bars frozen 35+ minutes during regular market hours) should.
 STALE_BAR_MIN_THRESHOLD_SEC = 600
+# Minimum gap between resubscribe attempts for the *same* symbol. A
+# resubscribe is a real reqHistoricalDataAsync call, subject to IB's
+# historical-data pacing limit (~60 requests per rolling 10-minute window
+# per connection -- see backtest/runner.py's docstring). Without a cooldown,
+# a farm-wide outage that hits the whole US watchlist at once (confirmed
+# live: 20 symbols going stale in the same tick, repeating every
+# STALE_BAR_CHECK_SEC because resubscribing doesn't fix an upstream farm
+# issue) re-fires that same 20-request burst every single check cycle --
+# ~20/min, over 3x the pacing budget, continuously -- which appears to have
+# been enough to choke the shared IB connection badly enough to make the
+# live dashboard (same event loop, same connection) unreachable for
+# minutes at a time. The cooldown bounds worst-case volume to roughly
+# (watchlist size / cooldown) regardless of how long the outage lasts.
+RESUBSCRIBE_COOLDOWN_SEC = 300
+# Spaces out resubscribe calls *within* one check cycle too, so a mass-stale
+# event doesn't fire its whole burst in under a second -- same pacing
+# pattern already used for Finnhub polling (see news/monitor.py).
+_RESUBSCRIBE_REQUEST_GAP_SEC = 1.0
 
 
 def build_strategy(settings: Settings) -> Strategy:
@@ -102,6 +120,7 @@ class TradingEngine:
         self._flattened_today: dict[str, bool] = {m: False for m in self.symbols_by_market}
         self._last_polled_refresh = 0.0
         self._last_stale_check = 0.0
+        self._last_resubscribe_attempt: dict[str, float] = {}
         self._dashboard_task: asyncio.Task | None = None
         # Latest bar-strategy indicator/signal snapshot per symbol, read
         # directly by the live dashboard (webapp.py) -- a plain shared dict
@@ -283,10 +302,21 @@ class TradingEngine:
         self-heal via their own periodic refresh and don't need this. A
         symbol whose market is open but hasn't produced a new bar in a
         while almost certainly has a stalled feed, not just a quiet market:
-        real markets produce a new bar every bar_size, always."""
+        real markets produce a new bar every bar_size, always.
+
+        A resubscribe can't fix an upstream farm-wide outage (confirmed
+        live: the whole US watchlist going stale together, staying stale
+        across repeated resubscribe attempts) -- it can only make things
+        worse by burning through IB's historical-data pacing budget on
+        requests that were never going to help, which appears to have been
+        enough to choke the shared connection and make the dashboard
+        unreachable too. RESUBSCRIBE_COOLDOWN_SEC bounds how often we'll
+        retry any one symbol regardless of how long it stays stale."""
         threshold_sec = max(parse_bar_size_seconds(self.settings.bar_size) * 3, STALE_BAR_MIN_THRESHOLD_SEC)
         now = datetime.now(timezone.utc)
+        now_monotonic = time.monotonic()
 
+        stale_symbols = []
         for symbol in list(self.contracts):
             if not self.bars.has_live_subscription(symbol):
                 continue
@@ -303,7 +333,22 @@ class TradingEngine:
             age_sec = (now - latest).total_seconds()
             if age_sec <= threshold_sec:
                 continue
+            stale_symbols.append((symbol, age_sec))
 
+        if not stale_symbols:
+            return
+
+        resubscribed = 0
+        on_cooldown = 0
+        for i, (symbol, age_sec) in enumerate(stale_symbols):
+            last_attempt = self._last_resubscribe_attempt.get(symbol)
+            if last_attempt is not None and now_monotonic - last_attempt < RESUBSCRIBE_COOLDOWN_SEC:
+                on_cooldown += 1
+                continue
+
+            if resubscribed > 0:
+                await asyncio.sleep(_RESUBSCRIBE_REQUEST_GAP_SEC)
+            self._last_resubscribe_attempt[symbol] = now_monotonic
             log.warning(
                 "%s: no new bar in %.0f min while its market is open -- the live data "
                 "feed may have stalled. Re-subscribing.",
@@ -314,6 +359,20 @@ class TradingEngine:
                 await self.bars.resubscribe_live(symbol)
             except Exception:  # noqa: BLE001 - one bad resubscribe must not stop the rest
                 log.exception("Failed to re-subscribe stale bar stream for %s", symbol)
+            resubscribed += 1
+
+        if len(stale_symbols) > 1:
+            log.warning(
+                "%d symbols had a stalled bar feed at once (%s) -- likely one shared IB "
+                "market data farm issue, not %d separate ones. Resubscribed %d, %d still "
+                "on a %ds cooldown from a recent attempt.",
+                len(stale_symbols),
+                ", ".join(s for s, _ in stale_symbols),
+                len(stale_symbols),
+                resubscribed,
+                on_cooldown,
+                RESUBSCRIBE_COOLDOWN_SEC,
+            )
 
     async def _process_symbol(
         self,

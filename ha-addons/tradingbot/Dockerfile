@@ -22,6 +22,14 @@ ARG TRADINGBOT_COMMIT=1491d5048d6f72456cd7ef377af83c266f297f22
 RUN pip install --no-cache-dir \
     "tradingbot @ git+https://github.com/Stullee/TradingBot.git@${TRADINGBOT_COMMIT}"
 
+# Mirrors config.yaml's version -- bump both together on every release.
+# Exported as a real env var (not just a build ARG) so main.py can log it at
+# startup: a pasted log snippet is otherwise ambiguous about which build
+# produced it, especially during active development with frequent rebuilds.
+ARG TRADINGBOT_VERSION=0.4.7
+ENV TRADINGBOT_VERSION=${TRADINGBOT_VERSION}
+ENV TRADINGBOT_COMMIT=${TRADINGBOT_COMMIT}
+
 WORKDIR /app
 COPY _addon_options.py /app/_addon_options.py
 COPY addon_entrypoint.py /app/addon_entrypoint.py

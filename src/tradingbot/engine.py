@@ -166,6 +166,7 @@ class TradingEngine:
         finally:
             self.orders.flatten_all()
             self.bars.unsubscribe_all()
+            self.fx.unsubscribe_all()
             self.broker.disconnect()
             if self.news_monitor is not None:
                 await self.news_monitor.aclose()

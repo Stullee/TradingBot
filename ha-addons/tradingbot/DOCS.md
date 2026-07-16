@@ -139,17 +139,30 @@ whether the news-sentiment signal would have been profitable, before ever
 considering wiring it to real execution.
 
 **Cost note:** this makes real, billed API calls — one Finnhub request per
-symbol per poll interval, and one Anthropic API call per new article seen.
-Keep `news_poll_interval_sec` reasonable (the default is 5 minutes) to avoid
-surprises on both providers' usage/rate limits. Which articles have already
-been assessed is persisted to `/data/logs/seen_news_ids.jsonl`, so a restart
-doesn't reprocess (and re-bill) the same day's news backlog again — before
-this was fixed, every restart re-assessed everything Finnhub's 1-day
-lookback returned as "new," which is what actually drains API credits fast
-on a large watchlist, not the poll interval itself. With a big watchlist
-(50+ symbols), also expect the poll to take up to a minute or so to
-complete — requests to Finnhub are deliberately paced to stay under its
-free-tier rate limit rather than firing all at once.
+symbol per poll interval, and one Anthropic API call per symbol per poll
+*only if* it has new (unseen) articles, batching all of that poll's new
+articles about the same stock into a single call rather than one call per
+headline. Keep `news_poll_interval_sec` reasonable (the default is 5
+minutes) to avoid surprises on both providers' usage/rate limits. Every
+article's outcome (real assessment, or skipped because a shadow trade was
+already open for that symbol) is persisted to
+`/data/logs/news_analysis.jsonl`, so a restart doesn't reprocess (and
+re-bill) the same day's news backlog again — before this was fixed, every
+restart re-assessed everything Finnhub's 1-day lookback returned as "new,"
+which is what actually drains API credits fast on a large watchlist, not
+the poll interval itself. With a big watchlist (50+ symbols), also expect
+the poll to take up to a minute or so to complete — requests to Finnhub are
+deliberately paced to stay under its free-tier rate limit rather than
+firing all at once.
+
+## Status report
+
+`python addon_report_entrypoint.py` (same `docker exec` pattern as the
+backtester, see below) prints a snapshot: account equity, open positions
+with unrealized P&L, today's realized P&L per symbol, today's fill count,
+and — reading straight from the persisted files above — news
+shadow-trading win rate/expectancy and news-analysis activity. Read-only,
+places no orders.
 
 ## Backtesting
 

@@ -4,6 +4,7 @@ import time
 from types import SimpleNamespace
 
 from tradingbot.news.monitor import NewsMonitor
+from tradingbot.news.sentiment import NewsAssessment
 
 
 def make_settings(tmp_path, **overrides):
@@ -20,26 +21,36 @@ def make_settings(tmp_path, **overrides):
 
 
 class FakeFinnhub:
-    def __init__(self):
+    def __init__(self, articles_by_symbol: dict[str, list[dict]] | None = None):
+        self.articles_by_symbol = articles_by_symbol or {}
         self.calls: list[str] = []
 
     async def company_news(self, symbol):
         self.calls.append(symbol)
-        return []
+        return self.articles_by_symbol.get(symbol, [])
+
+
+class FakeAnalyzer:
+    def __init__(self, assessment: NewsAssessment | None = None):
+        self.assessment = assessment or NewsAssessment("NONE", 0.0, "no-op")
+        self.calls: list[tuple[str, list[dict]]] = []
+
+    async def assess(self, symbol, articles):
+        self.calls.append((symbol, list(articles)))
+        return self.assessment
+
+
+class FakeShadow:
+    def __init__(self, open_symbols: set[str] | None = None):
+        self.open_symbols = open_symbols or set()
+
+    def has_open(self, symbol):
+        return symbol in self.open_symbols
 
 
 def test_no_seen_ids_file_yet_starts_empty(tmp_path):
     monitor = NewsMonitor(make_settings(tmp_path), bars=None)
     assert monitor._seen_article_ids == set()
-
-
-def test_mark_seen_appends_one_json_line_per_id(tmp_path):
-    monitor = NewsMonitor(make_settings(tmp_path), bars=None)
-    monitor._mark_seen(1)
-    monitor._mark_seen(2)
-
-    lines = monitor._seen_ids_path.read_text().strip().splitlines()
-    assert [json.loads(line)["id"] for line in lines] == [1, 2]
 
 
 def test_seen_ids_persist_across_restarts():
@@ -52,11 +63,35 @@ def test_seen_ids_persist_across_restarts():
     with tempfile.TemporaryDirectory() as tmp_dir:
         settings = make_settings(tmp_dir)
         monitor1 = NewsMonitor(settings, bars=None)
-        monitor1._mark_seen(123)
-        monitor1._mark_seen(456)
+        monitor1._persist_seen("AAPL", [123, 456], ["h1", "h2"], NewsAssessment("NONE", 0.1, "r"))
 
         monitor2 = NewsMonitor(settings, bars=None)  # simulates a restart
         assert monitor2._seen_article_ids == {123, 456}
+
+
+def test_persist_seen_writes_full_assessment_record(tmp_path):
+    monitor = NewsMonitor(make_settings(tmp_path), bars=None)
+    monitor._persist_seen(
+        "AAPL", [1], ["Apple beats earnings"], NewsAssessment("LONG", 0.8, "strong beat")
+    )
+
+    lines = monitor._analysis_log_path.read_text().strip().splitlines()
+    record = json.loads(lines[0])
+    assert record["symbol"] == "AAPL"
+    assert record["article_ids"] == [1]
+    assert record["direction"] == "LONG"
+    assert record["confidence"] == 0.8
+    assert record["skipped_reason"] is None
+
+
+def test_persist_seen_records_skip_reason_without_an_assessment(tmp_path):
+    monitor = NewsMonitor(make_settings(tmp_path), bars=None)
+    monitor._persist_seen("AAPL", [1], ["headline"], assessment=None)
+
+    lines = monitor._analysis_log_path.read_text().strip().splitlines()
+    record = json.loads(lines[0])
+    assert record["direction"] is None
+    assert "shadow trade already open" in record["skipped_reason"]
 
 
 def test_poll_news_paces_requests_and_skips_gap_before_the_first(tmp_path, monkeypatch):
@@ -73,3 +108,61 @@ def test_poll_news_paces_requests_and_skips_gap_before_the_first(tmp_path, monke
     assert fake.calls == ["AAPL", "MSFT", "GOOGL"]
     # 3 symbols -> 2 gaps, not 3 -> no wasted wait before the very first request
     assert elapsed >= 0.04
+
+
+def test_multiple_new_articles_for_one_symbol_are_assessed_in_a_single_call(tmp_path):
+    """This is the "big picture" behavior: N new articles about the same
+    stock in one poll should cost one Claude call, not N."""
+    articles = [
+        {"id": 1, "headline": "Good news"},
+        {"id": 2, "headline": "Bad news"},
+        {"id": 3, "headline": "More news"},
+    ]
+    settings = make_settings(tmp_path, symbol_list=["AAPL"])
+    monitor = NewsMonitor(settings, bars=None)
+    monitor.finnhub = FakeFinnhub({"AAPL": articles})
+    monitor.shadow = FakeShadow()
+    fake_analyzer = FakeAnalyzer(NewsAssessment("NONE", 0.2, "mixed signals"))
+    monitor.analyzer = fake_analyzer
+
+    asyncio.run(monitor._poll_news())
+
+    assert len(fake_analyzer.calls) == 1
+    symbol, seen_articles = fake_analyzer.calls[0]
+    assert symbol == "AAPL"
+    assert [a["id"] for a in seen_articles] == [1, 2, 3]
+    assert monitor._seen_article_ids == {1, 2, 3}
+
+
+def test_already_seen_articles_are_not_reassessed(tmp_path):
+    articles = [{"id": 1, "headline": "Old news"}, {"id": 2, "headline": "New news"}]
+    settings = make_settings(tmp_path, symbol_list=["AAPL"])
+    monitor = NewsMonitor(settings, bars=None)
+    monitor.finnhub = FakeFinnhub({"AAPL": articles})
+    monitor.shadow = FakeShadow()
+    monitor._seen_article_ids = {1}  # id 1 was already assessed in an earlier poll
+    fake_analyzer = FakeAnalyzer(NewsAssessment("NONE", 0.1, "r"))
+    monitor.analyzer = fake_analyzer
+
+    asyncio.run(monitor._poll_news())
+
+    assert len(fake_analyzer.calls) == 1
+    _, seen_articles = fake_analyzer.calls[0]
+    assert [a["id"] for a in seen_articles] == [2]  # only the unseen one
+
+
+def test_no_analyzer_call_when_shadow_trade_already_open(tmp_path):
+    """Saves the API call entirely (not just skips opening a new shadow
+    trade) -- has_open() is checked before assess(), not after."""
+    articles = [{"id": 1, "headline": "headline"}]
+    settings = make_settings(tmp_path, symbol_list=["AAPL"])
+    monitor = NewsMonitor(settings, bars=None)
+    monitor.finnhub = FakeFinnhub({"AAPL": articles})
+    monitor.shadow = FakeShadow(open_symbols={"AAPL"})
+    fake_analyzer = FakeAnalyzer()
+    monitor.analyzer = fake_analyzer
+
+    asyncio.run(monitor._poll_news())
+
+    assert fake_analyzer.calls == []
+    assert monitor._seen_article_ids == {1}  # still marked seen, just never billed

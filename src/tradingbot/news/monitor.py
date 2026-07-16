@@ -6,7 +6,17 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+from tradingbot.config import Settings
+from tradingbot.data.bars import BarStream
+from tradingbot.data.indicators import add_indicators
+from tradingbot.news.finnhub_client import FinnhubNewsClient
+from tradingbot.news.sentiment import NewsAssessment, NewsSentimentAnalyzer
+from tradingbot.news.shadow_trade import ShadowTradeTracker
+
+log = logging.getLogger(__name__)
 
 # Finnhub's free tier allows ~60 requests/minute. _poll_news() makes one
 # request per watched symbol every poll cycle -- with a large watchlist,
@@ -15,15 +25,6 @@ from pathlib import Path
 # this much keeps a 70-symbol poll under ~80s, comfortably inside the
 # per-minute limit, well within the (much longer) poll interval budget.
 _FINNHUB_REQUEST_GAP_SEC = 1.1
-
-from tradingbot.config import Settings
-from tradingbot.data.bars import BarStream
-from tradingbot.data.indicators import add_indicators
-from tradingbot.news.finnhub_client import FinnhubNewsClient
-from tradingbot.news.sentiment import NewsSentimentAnalyzer
-from tradingbot.news.shadow_trade import ShadowTradeTracker
-
-log = logging.getLogger(__name__)
 
 
 class NewsMonitor:
@@ -36,37 +37,60 @@ class NewsMonitor:
             log_path=Path(settings.log_dir) / "shadow_trades.jsonl",
             max_hold_min=settings.news_max_hold_min,
         )
-        # Persisted (not just in-memory) so a restart doesn't forget which
-        # articles were already assessed. Finnhub's company_news is polled
-        # with a 1-day lookback every cycle regardless of restarts -- an
-        # in-memory-only seen-set meant every restart reprocessed that
-        # entire rolling 1-day backlog as "new" and re-billed Claude for
-        # every one of them in a single burst, which is what was actually
-        # draining API credits fast, not the 300s poll interval itself.
-        self._seen_ids_path = Path(settings.log_dir) / "seen_news_ids.jsonl"
+        # Every article's outcome gets persisted here -- both the actual
+        # Claude assessment (direction/confidence/rationale) and articles
+        # skipped without calling Claude at all (a shadow trade was already
+        # open for that symbol). Two things this fixes vs. an in-memory-only
+        # seen-set: (1) a restart doesn't forget what's already been
+        # assessed -- Finnhub is polled with a 1-day lookback every cycle
+        # regardless of restarts, so forgetting meant every restart
+        # re-billed Claude for the whole rolling backlog in one burst, which
+        # is what was actually draining API credits fast, not the poll
+        # interval; (2) you get a readable, queryable record of every
+        # analysis instead of only ephemeral log lines.
+        self._analysis_log_path = Path(settings.log_dir) / "news_analysis.jsonl"
         self._seen_article_ids: set[int] = self._load_seen_ids()
         self._last_poll_monotonic: float = 0.0
 
     def _load_seen_ids(self) -> set[int]:
-        if not self._seen_ids_path.exists():
+        if not self._analysis_log_path.exists():
             return set()
         ids: set[int] = set()
-        with self._seen_ids_path.open() as f:
+        with self._analysis_log_path.open() as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    ids.add(json.loads(line)["id"])
+                    ids.update(json.loads(line)["article_ids"])
                 except (json.JSONDecodeError, KeyError):
                     continue
         return ids
 
-    def _mark_seen(self, article_id: int) -> None:
-        self._seen_article_ids.add(article_id)
-        self._seen_ids_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._seen_ids_path.open("a") as f:
-            f.write(json.dumps({"id": article_id}) + "\n")
+    def _persist_seen(
+        self,
+        symbol: str,
+        article_ids: list[int],
+        headlines: list[str],
+        assessment: NewsAssessment | None,
+    ) -> None:
+        """Marks these article ids seen (never re-assessed again, even
+        across a restart) and appends a record of what happened -- either a
+        real assessment, or why one was skipped without calling Claude."""
+        self._seen_article_ids.update(article_ids)
+        record = {
+            "symbol": symbol,
+            "article_ids": article_ids,
+            "headlines": headlines,
+            "assessed_at": datetime.now(timezone.utc).isoformat(),
+            "skipped_reason": None if assessment else "shadow trade already open for this symbol",
+            "direction": assessment.direction if assessment else None,
+            "confidence": assessment.confidence if assessment else None,
+            "rationale": assessment.rationale if assessment else None,
+        }
+        self._analysis_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._analysis_log_path.open("a") as f:
+            f.write(json.dumps(record) + "\n")
 
     async def tick(self) -> None:
         """Call on every engine tick. Price updates for open shadow trades are
@@ -98,30 +122,41 @@ class NewsMonitor:
                 log.warning("Failed to fetch news for %s: %s", symbol, exc)
                 continue
 
-            for article in articles:
-                article_id = article.get("id")
-                if article_id is None or article_id in self._seen_article_ids:
-                    continue
-                self._mark_seen(article_id)
-                await self._handle_article(symbol, article)
+            new_articles = [
+                a
+                for a in articles
+                if a.get("id") is not None
+                and a["id"] not in self._seen_article_ids
+                and a.get("headline")
+            ]
+            if new_articles:
+                await self._handle_articles(symbol, new_articles)
 
-    async def _handle_article(self, symbol: str, article: dict) -> None:
+    async def _handle_articles(self, symbol: str, articles: list[dict]) -> None:
+        """Assesses every new article about `symbol` from this poll together
+        as one combined picture (rather than one isolated call per
+        headline), so e.g. a mix of good and bad news nets out sensibly
+        instead of each piece being judged with no awareness of the others.
+        This also directly cuts API call volume on days with multiple
+        articles about the same stock."""
+        article_ids = [a["id"] for a in articles]
+        headlines = [a.get("headline", "") for a in articles]
+
         if self.shadow.has_open(symbol):
+            self._persist_seen(symbol, article_ids, headlines, assessment=None)
             return  # one shadow trade per symbol at a time, keeps evaluation simple
 
-        headline = article.get("headline", "")
-        summary = article.get("summary", "")
-        if not headline:
-            return
+        assessment = await self.analyzer.assess(symbol, articles)
+        self._persist_seen(symbol, article_ids, headlines, assessment)
 
-        assessment = await self.analyzer.assess(symbol, headline, summary)
         log.info(
-            "[NEWS] %s: %s (confidence=%.2f) - %s | %s",
+            "[NEWS] %s: %s (confidence=%.2f) from %d article(s) - %s | %s",
             symbol,
             assessment.direction,
             assessment.confidence,
+            len(articles),
             assessment.rationale,
-            headline,
+            "; ".join(headlines),
         )
         if assessment.direction == "NONE":
             return
@@ -159,7 +194,7 @@ class NewsMonitor:
             entry_price,
             stop_price,
             target_price,
-            headline=headline,
+            headline="; ".join(headlines),
             confidence=assessment.confidence,
             rationale=assessment.rationale,
         )

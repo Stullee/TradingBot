@@ -93,6 +93,13 @@ async def run() -> None:
         broker.disconnect()
 
     print("\n=== Aggregate (all symbols pooled) ===")
+    # win_rate/avg_R/profit_factor/sharpe don't depend on order, but
+    # max_drawdown_r and max_consecutive_losses do -- all_trades was built
+    # by appending each symbol's already-time-ordered list one symbol at a
+    # time, not merged chronologically, so sort by exit time first or those
+    # two numbers reflect a nonsensical "all of TSLA's trades, then all of
+    # NVDA's trades, ..." sequence instead of a real cross-symbol timeline.
+    all_trades.sort(key=lambda t: t.exit_time)
     overall = summarize(all_trades)
     pf = "inf" if overall.profit_factor == float("inf") else f"{overall.profit_factor:.2f}"
     print(

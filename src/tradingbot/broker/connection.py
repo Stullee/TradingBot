@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from ib_async import IB, Contract, Crypto, Stock
+from ib_async import IB, Contract, Crypto, PortfolioItem, Stock
 
 from tradingbot.config import Settings
 
@@ -16,7 +16,19 @@ class BrokerConnection:
         self.settings = settings
         self.ib = IB()
         self.ib.disconnectedEvent += self._on_disconnected
+        # ib_async's own portfolio() cache drops a contract the instant its
+        # position hits 0 (that's how updatePortfolio works -- see
+        # ib_async.wrapper.Wrapper.updatePortfolio), taking that position's
+        # realizedPNL with it. Tracked here independently, keyed by symbol,
+        # so a fully closed position's realized P&L stays visible (e.g. in
+        # the live dashboard/report) instead of vanishing the moment it
+        # flattens. Reflects realized P&L since this connection was opened.
+        self.realized_pnl_by_symbol: dict[str, float] = {}
+        self.ib.updatePortfolioEvent += self._on_portfolio_update
         self._closing = False
+
+    def _on_portfolio_update(self, item: PortfolioItem) -> None:
+        self.realized_pnl_by_symbol[item.contract.symbol] = item.realizedPNL
 
     async def connect(self) -> None:
         s = self.settings

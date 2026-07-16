@@ -69,8 +69,13 @@ async def gather_account_status(
         )
         for p in positions_raw
     ]
+    # Read from the broker's own running tracker (see BrokerConnection),
+    # not derived fresh from portfolio() -- that cache drops a symbol the
+    # instant its position flattens to 0, taking its realizedPNL with it.
     realized_pnl_by_symbol = {
-        p.contract.symbol: p.realizedPNL for p in portfolio if p.realizedPNL not in (None, 0.0)
+        symbol: pnl
+        for symbol, pnl in broker.realized_pnl_by_symbol.items()
+        if pnl not in (None, 0.0)
     }
 
     fills_by_symbol: dict[str, int] | None = None

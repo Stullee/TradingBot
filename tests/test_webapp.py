@@ -97,6 +97,7 @@ def test_status_endpoint_includes_per_symbol_signals_and_open_shadow_trades(tmp_
                 headline="Apple beats earnings",
                 confidence=0.82,
                 rationale="strong beat",
+                last_price=151.0,
             )
         }
 
@@ -128,6 +129,8 @@ def test_status_endpoint_includes_per_symbol_signals_and_open_shadow_trades(tmp_
             assert len(data["open_shadow_trades"]) == 1
             assert data["open_shadow_trades"][0]["symbol"] == "AAPL"
             assert data["open_shadow_trades"][0]["direction"] == "LONG"
+            assert data["open_shadow_trades"][0]["last_price"] == 151.0
+            assert data["open_shadow_trades"][0]["unrealized_r"] == 0.5  # (151-150)/(150-148)
         finally:
             await client.close()
 

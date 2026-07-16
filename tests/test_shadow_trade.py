@@ -75,6 +75,40 @@ def test_no_close_while_price_between_stop_and_target(tmp_path):
     assert not tmp_path.joinpath("shadow_trades.jsonl").exists()
 
 
+def test_open_trade_tracks_last_price_and_unrealized_r(tmp_path):
+    tracker = make_tracker(tmp_path)
+    tracker.open(
+        "AAPL", "LONG", entry_price=100.0, stop_price=98.0, target_price=104.0,
+        headline="h", confidence=0.8, rationale="r",
+    )
+    tracker.update("AAPL", current_price=101.0)  # still between stop and target
+
+    trade = tracker.open_trades["AAPL"]
+    assert trade.last_price == 101.0
+    assert trade.unrealized_r_multiple() == 0.5  # (101-100) / (100-98)
+
+
+def test_unrealized_r_multiple_for_a_short():
+    from tradingbot.news.shadow_trade import ShadowTrade
+
+    trade = ShadowTrade(
+        symbol="TSLA", direction="SHORT", entry_price=200.0, stop_price=204.0,
+        target_price=192.0, opened_at="t", headline="h", confidence=0.8, rationale="r",
+        last_price=196.0,
+    )
+    assert trade.unrealized_r_multiple() == 1.0  # (200-196) / (204-200)
+
+
+def test_unrealized_r_multiple_is_none_before_any_price_update():
+    from tradingbot.news.shadow_trade import ShadowTrade
+
+    trade = ShadowTrade(
+        symbol="AAPL", direction="LONG", entry_price=100.0, stop_price=98.0,
+        target_price=104.0, opened_at="t", headline="h", confidence=0.8, rationale="r",
+    )
+    assert trade.unrealized_r_multiple() is None
+
+
 def test_has_open_blocks_until_closed(tmp_path):
     tracker = make_tracker(tmp_path)
     tracker.open(

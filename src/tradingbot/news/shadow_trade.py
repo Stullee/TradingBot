@@ -33,6 +33,23 @@ class ShadowTrade:
     closed_at: str | None = None
     exit_price: float | None = None
     r_multiple: float | None = None
+    last_price: float | None = None  # most recent price seen while OPEN, for live P&L display
+
+    def unrealized_r_multiple(self) -> float | None:
+        """R-multiple as of last_price -- "are we winning or losing right
+        now" for a still-open trade, same convention as the closed-trade
+        r_multiple (+1R = target-sized win, -1R = full stop-out)."""
+        if self.last_price is None:
+            return None
+        risk_per_share = abs(self.entry_price - self.stop_price)
+        if risk_per_share <= 0:
+            return None
+        pnl_per_share = (
+            self.last_price - self.entry_price
+            if self.direction == "LONG"
+            else self.entry_price - self.last_price
+        )
+        return round(pnl_per_share / risk_per_share, 3)
 
 
 class ShadowTradeTracker:
@@ -85,6 +102,7 @@ class ShadowTradeTracker:
         if trade is None:
             return
         now = now or datetime.now(timezone.utc)
+        trade.last_price = current_price
 
         if trade.direction == "LONG":
             hit_target = current_price >= trade.target_price

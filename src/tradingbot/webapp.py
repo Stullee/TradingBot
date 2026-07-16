@@ -115,13 +115,17 @@ function renderRealized(byBymbol) {
 function renderOpenShadowTrades(trades) {
   if (!trades.length) return '<div class="empty">No shadow trades currently open.</div>';
   var rows = trades.map(function(t) {
+    var r = t.unrealized_r;
+    var rText = (r === null || r === undefined) ? "-" : (r >= 0 ? "+" : "") + fmt(r, 2) + "R";
     return "<tr><td>" + t.symbol + "</td><td>" + badge(t.direction) + "</td><td>" +
-      fmt(t.entry_price, 2) + "</td><td>" + fmt(t.stop_price, 2) + "</td><td>" +
-      fmt(t.target_price, 2) + "</td><td>" + fmt(t.confidence, 2) + "</td><td>" +
+      fmt(t.entry_price, 2) + "</td><td>" + (t.last_price !== null && t.last_price !== undefined ? fmt(t.last_price, 2) : "-") +
+      "</td><td class=\"" + cls(r) + "\">" + rText + "</td><td>" +
+      fmt(t.stop_price, 2) + "</td><td>" + fmt(t.target_price, 2) + "</td><td>" +
+      fmt(t.confidence, 2) + "</td><td>" +
       (t.opened_at || "").slice(11, 19) + "</td><td>" + (t.headline || "") + "</td></tr>";
   }).join("");
-  return "<table><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Stop</th><th>Target</th>" +
-    "<th>Confidence</th><th>Opened</th><th>Headline</th></tr>" + rows + "</table>";
+  return "<table><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Current</th><th>Unrealized</th>" +
+    "<th>Stop</th><th>Target</th><th>Confidence</th><th>Opened</th><th>Headline</th></tr>" + rows + "</table>";
 }
 
 function render(data) {
@@ -224,7 +228,10 @@ async def _status_payload(
 
     open_shadow_trades = []
     if news_monitor is not None:
-        open_shadow_trades = [asdict(t) for t in news_monitor.shadow.open_trades.values()]
+        for t in news_monitor.shadow.open_trades.values():
+            row = asdict(t)
+            row["unrealized_r"] = t.unrealized_r_multiple()
+            open_shadow_trades.append(row)
 
     return {
         "equity": account.equity,

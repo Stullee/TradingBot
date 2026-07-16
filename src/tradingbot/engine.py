@@ -15,7 +15,7 @@ from ib_async import Contract
 
 from tradingbot.broker.connection import BrokerConnection
 from tradingbot.config import Settings
-from tradingbot.data.bars import BarStream
+from tradingbot.data.bars import BarStream, parse_bar_size_seconds
 from tradingbot.data.indicators import add_indicators
 from tradingbot.execution.order_manager import OrderManager
 from tradingbot.fx import FxConverter
@@ -33,6 +33,13 @@ log = logging.getLogger(__name__)
 
 POLL_INTERVAL_SEC = 10
 POLLED_BARS_REFRESH_SEC = 60
+STALE_BAR_CHECK_SEC = 60
+# At least 3 bar intervals with no new bar (and at least 10 min regardless,
+# for small bar sizes) before treating a live stream as stalled -- normal
+# bar-close timing jitter shouldn't false-positive, but IB market data farm
+# hiccups that silently stop delivering updates (confirmed live: no error
+# logged, bars frozen 35+ minutes during regular market hours) should.
+STALE_BAR_MIN_THRESHOLD_SEC = 600
 
 
 def build_strategy(settings: Settings) -> Strategy:
@@ -92,6 +99,7 @@ class TradingEngine:
         }
         self._flattened_today: dict[str, bool] = {m: False for m in self.symbols_by_market}
         self._last_polled_refresh = 0.0
+        self._last_stale_check = 0.0
         self._dashboard_task: asyncio.Task | None = None
         # Latest bar-strategy indicator/signal snapshot per symbol, read
         # directly by the live dashboard (webapp.py) -- a plain shared dict
@@ -223,6 +231,10 @@ class TradingEngine:
             for symbol in self.contracts:
                 self.bars.log_latest(symbol)
 
+        if now - self._last_stale_check >= STALE_BAR_CHECK_SEC:
+            self._last_stale_check = now
+            await self._check_stale_bars()
+
         equity = self.broker.account_net_liquidation()
 
         if self.risk.check_daily_loss_limit(equity):
@@ -258,6 +270,45 @@ class TradingEngine:
             await self._process_symbol(
                 symbol, equity, open_position_count, stop_new_entries, outside_rth
             )
+
+    async def _check_stale_bars(self) -> None:
+        """Live (keepUpToDate=True) bar streams can silently stop delivering
+        updates without ever raising an error -- an IB market data farm
+        hiccup doesn't always surface as one. Polled symbols (crypto)
+        self-heal via their own periodic refresh and don't need this. A
+        symbol whose market is open but hasn't produced a new bar in a
+        while almost certainly has a stalled feed, not just a quiet market:
+        real markets produce a new bar every bar_size, always."""
+        threshold_sec = max(parse_bar_size_seconds(self.settings.bar_size) * 3, STALE_BAR_MIN_THRESHOLD_SEC)
+        now = datetime.now(timezone.utc)
+
+        for symbol in list(self.contracts):
+            if not self.bars.has_live_subscription(symbol):
+                continue
+            spec = self.spec_by_symbol.get(symbol)
+            if spec is None:
+                continue
+            session = self.market_sessions.get(spec.market)
+            if session is None or not session.is_open():
+                continue
+
+            latest = self.bars.latest_bar_time(symbol)
+            if latest is None:
+                continue
+            age_sec = (now - latest).total_seconds()
+            if age_sec <= threshold_sec:
+                continue
+
+            log.warning(
+                "%s: no new bar in %.0f min while its market is open -- the live data "
+                "feed may have stalled. Re-subscribing.",
+                symbol,
+                age_sec / 60,
+            )
+            try:
+                await self.bars.resubscribe_live(symbol)
+            except Exception:  # noqa: BLE001 - one bad resubscribe must not stop the rest
+                log.exception("Failed to re-subscribe stale bar stream for %s", symbol)
 
     async def _process_symbol(
         self,

@@ -151,6 +151,35 @@ def test_already_seen_articles_are_not_reassessed(tmp_path):
     assert [a["id"] for a in seen_articles] == [2]  # only the unseen one
 
 
+def test_large_backlog_is_capped_and_deferred_not_dumped_in_one_call(tmp_path):
+    """The bug this guards against: a fresh start (or any symbol with no
+    seen-ids history) can have Finnhub's 1-day lookback return a huge batch
+    (confirmed live: 250 articles for one symbol in one poll). All of that
+    must not go into a single Claude call -- only the cap's worth of the
+    most recent articles should be assessed; the rest stay unseen for a
+    later poll."""
+    articles = [
+        {"id": i, "headline": f"headline {i}", "datetime": i} for i in range(1, 26)
+    ]  # 25 articles, newest (highest id/datetime) last in this list on purpose
+    settings = make_settings(tmp_path, symbol_list=["AAPL"])
+    monitor = NewsMonitor(settings, bars=None)
+    monitor.finnhub = FakeFinnhub({"AAPL": articles})
+    monitor.shadow = FakeShadow()
+    fake_analyzer = FakeAnalyzer(NewsAssessment("NONE", 0.2, "r"))
+    monitor.analyzer = fake_analyzer
+
+    asyncio.run(monitor._poll_news())
+
+    assert len(fake_analyzer.calls) == 1
+    _, assessed = fake_analyzer.calls[0]
+    assert len(assessed) == 10  # capped, not all 25
+    # the most recent 10 (by datetime), not an arbitrary first-10 slice
+    assert sorted(a["id"] for a in assessed) == list(range(16, 26))
+    # only the assessed ones are marked seen -- the other 15 stay unseen
+    # and will be picked up (still capped) on a later poll
+    assert monitor._seen_article_ids == set(range(16, 26))
+
+
 def test_no_analyzer_call_when_shadow_trade_already_open(tmp_path):
     """Saves the API call entirely (not just skips opening a new shadow
     trade) -- has_open() is checked before assess(), not after."""
@@ -166,3 +195,19 @@ def test_no_analyzer_call_when_shadow_trade_already_open(tmp_path):
 
     assert fake_analyzer.calls == []
     assert monitor._seen_article_ids == {1}  # still marked seen, just never billed
+
+
+def test_poll_completion_is_always_logged_even_with_nothing_new(tmp_path, caplog):
+    """The bug this guards against: a poll that finds zero new articles for
+    every symbol used to log nothing at all, making "the news monitor is
+    fine but quiet" indistinguishable from "the news monitor is silently
+    broken" -- both just look like silence in the log."""
+    settings = make_settings(tmp_path, symbol_list=["AAPL", "MSFT"])
+    monitor = NewsMonitor(settings, bars=None)
+    monitor.finnhub = FakeFinnhub({})  # no articles for anyone
+
+    with caplog.at_level("INFO"):
+        asyncio.run(monitor._poll_news())
+
+    assert "News poll complete" in caplog.text
+    assert "0/2 symbols had new articles" in caplog.text

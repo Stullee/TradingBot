@@ -183,7 +183,17 @@ which is what actually drains API credits fast on a large watchlist, not
 the poll interval itself. With a big watchlist (50+ symbols), also expect
 the poll to take up to a minute or so to complete — requests to Finnhub are
 deliberately paced to stay under its free-tier rate limit rather than
-firing all at once.
+firing all at once. Each symbol's batch is also capped at 10 articles per
+poll (the most recent 10, by publish time) — a fresh start or a very newsy
+stock can otherwise hand Finnhub's full 1-day lookback to a single Claude
+call at once (confirmed live: 250 articles in one call for a single
+symbol), which is both expensive and a worse assessment than a focused
+batch. Anything past the cap simply stays unseen and gets picked up (still
+capped) on a later poll instead of being dropped. If the news monitor ever
+looks like it's gone quiet, check for a `News poll complete: X/Y symbols
+had new articles...` line — that's logged every poll regardless of
+whether anything was found, so silence there (not just silence in
+`[NEWS]` lines) is the real signal something's actually stuck.
 
 ## Status report
 

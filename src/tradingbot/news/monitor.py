@@ -26,6 +26,18 @@ log = logging.getLogger(__name__)
 # per-minute limit, well within the (much longer) poll interval budget.
 _FINNHUB_REQUEST_GAP_SEC = 1.1
 
+# Finnhub's 1-day lookback returns everything for that rolling window every
+# poll, not just what's actually new -- on a fresh start (or any symbol
+# with no seen-ids history yet), that backlog can be huge for an active
+# stock (confirmed live: 250 articles for NVDA in one poll). Dumping all of
+# them into a single Claude call is both needlessly expensive (one massive
+# prompt) and bad for signal quality -- 250 mostly-unrelated headlines
+# synthesized into one verdict isn't "one focused picture," it's noise.
+# Capping the batch and prioritizing the most recent articles means the
+# rest simply stay unseen and get picked up (still capped) on subsequent
+# polls, spreading a one-time backlog out instead of dumping it all at once.
+_MAX_ARTICLES_PER_BATCH = 10
+
 
 class NewsMonitor:
     def __init__(self, settings: Settings, bars: BarStream):
@@ -113,6 +125,10 @@ class NewsMonitor:
             self.shadow.update(symbol, price)
 
     async def _poll_news(self) -> None:
+        symbols_with_new_articles = 0
+        articles_assessed = 0
+        articles_deferred = 0
+
         for i, symbol in enumerate(self.settings.symbol_list):
             if i > 0:
                 await asyncio.sleep(_FINNHUB_REQUEST_GAP_SEC)
@@ -129,8 +145,25 @@ class NewsMonitor:
                 and a["id"] not in self._seen_article_ids
                 and a.get("headline")
             ]
-            if new_articles:
-                await self._handle_articles(symbol, new_articles)
+            if not new_articles:
+                continue
+
+            symbols_with_new_articles += 1
+            new_articles.sort(key=lambda a: a.get("datetime", 0), reverse=True)
+            batch = new_articles[:_MAX_ARTICLES_PER_BATCH]
+            articles_assessed += len(batch)
+            articles_deferred += len(new_articles) - len(batch)
+            await self._handle_articles(symbol, batch)
+
+        log.info(
+            "News poll complete: %d/%d symbols had new articles, %d assessed, "
+            "%d deferred to a later poll (batch cap=%d).",
+            symbols_with_new_articles,
+            len(self.settings.symbol_list),
+            articles_assessed,
+            articles_deferred,
+            _MAX_ARTICLES_PER_BATCH,
+        )
 
     async def _handle_articles(self, symbol: str, articles: list[dict]) -> None:
         """Assesses every new article about `symbol` from this poll together

@@ -67,9 +67,36 @@ def test_rate_is_cached_within_ttl():
 
 def test_missing_rate_raises():
     ib = FakeIB({})
-    fx = FxConverter(ib)
+    fx = FxConverter(ib, retry_delay_sec=0)
     try:
         run(fx.rate("EUR", "JPY"))
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "EUR->JPY" in str(exc)
+
+
+class FlakyThenGoodIB:
+    """Returns no data for the first N attempts, then a real quote -- simulates
+    a one-shot snapshot request racing ahead of the quote actually populating."""
+
+    def __init__(self, rates: dict[str, float], fail_attempts: int):
+        self.rates = rates
+        self.fail_attempts = fail_attempts
+        self.calls = 0
+
+    async def reqTickersAsync(self, contract):
+        self.calls += 1
+        pair = contract.symbol + contract.currency
+        if self.calls <= self.fail_attempts:
+            return [FakeTicker(None)]
+        return [FakeTicker(self.rates.get(pair))]
+
+
+def test_transient_missing_quote_is_retried():
+    # Direct + inverse pair are each tried once per attempt -> 2 calls/attempt.
+    # Failing the first 2 calls means the direct pair fails on attempt 1, and
+    # the retry on attempt 2 succeeds.
+    ib = FlakyThenGoodIB({"EURUSD": 1.10}, fail_attempts=2)
+    fx = FxConverter(ib, retry_delay_sec=0)
+    rate = run(fx.rate("EUR", "USD"))
+    assert rate == 1.10

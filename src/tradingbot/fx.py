@@ -3,6 +3,7 @@ account's base currency can size positions denominated in other currencies.
 Identity fast-path when currencies match -- no IB request needed."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -12,9 +13,17 @@ log = logging.getLogger(__name__)
 
 
 class FxConverter:
-    def __init__(self, ib: IB, cache_ttl_sec: float = 60.0):
+    def __init__(
+        self,
+        ib: IB,
+        cache_ttl_sec: float = 60.0,
+        retry_attempts: int = 3,
+        retry_delay_sec: float = 1.0,
+    ):
         self.ib = ib
         self.cache_ttl_sec = cache_ttl_sec
+        self.retry_attempts = retry_attempts
+        self.retry_delay_sec = retry_delay_sec
         self._rate_cache: dict[tuple[str, str], tuple[float, float]] = {}
 
     async def rate(self, from_ccy: str, to_ccy: str) -> float:
@@ -37,13 +46,20 @@ class FxConverter:
 
     async def _fetch_rate(self, from_ccy: str, to_ccy: str) -> float:
         # IB usually only lists one direction per pair (e.g. EURUSD, not
-        # USDEUR) -- try direct, then fall back to the inverse.
-        for pair, invert in ((f"{from_ccy}{to_ccy}", False), (f"{to_ccy}{from_ccy}", True)):
-            try:
-                [ticker] = await self.ib.reqTickersAsync(Forex(pair))
-                price = ticker.midpoint()
-                if price and price == price:  # excludes NaN/None/0
-                    return (1 / price) if invert else price
-            except Exception as exc:  # noqa: BLE001 - try the next pair/direction
-                log.debug("FX lookup for %s failed: %s", pair, exc)
+        # USDEUR) -- try direct, then fall back to the inverse. Retried a
+        # few times with a short delay: a one-shot snapshot request can
+        # race ahead of the quote actually populating (especially on
+        # delayed data), so the first attempt returning nothing doesn't
+        # mean the pair is unavailable.
+        for attempt in range(self.retry_attempts):
+            for pair, invert in ((f"{from_ccy}{to_ccy}", False), (f"{to_ccy}{from_ccy}", True)):
+                try:
+                    [ticker] = await self.ib.reqTickersAsync(Forex(pair))
+                    price = ticker.midpoint()
+                    if price and price == price:  # excludes NaN/None/0
+                        return (1 / price) if invert else price
+                except Exception as exc:  # noqa: BLE001 - try the next pair/direction
+                    log.debug("FX lookup for %s failed: %s", pair, exc)
+            if attempt < self.retry_attempts - 1:
+                await asyncio.sleep(self.retry_delay_sec)
         raise RuntimeError(f"Could not determine FX rate for {from_ccy}->{to_ccy}")

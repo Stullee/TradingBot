@@ -267,7 +267,7 @@ class TradingEngine:
 
         if position_qty != 0:
             if self.strategy.is_exit_signal(enriched, position_is_long=position_qty > 0):
-                log.info("%s: exit signal (EMA cross reversal), flattening.", symbol)
+                log.info("%s: strategy exit signal, flattening.", symbol)
                 self.orders.flatten_position(contract, position_qty)
             return
 

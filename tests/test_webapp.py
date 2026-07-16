@@ -33,6 +33,11 @@ def test_index_serves_html(tmp_path):
             assert "text/html" in resp.headers["Content-Type"]
             body = await resp.text()
             assert "TradingBot Status" in body
+            # Regression guard: a bare relative fetch("api/status") mis-resolves
+            # under HA Ingress when the iframe's URL lacks a trailing slash,
+            # silently dropping the ingress token and never reaching this
+            # process at all -- see webapp.py's API_STATUS_URL comment.
+            assert 'location.pathname.replace(/\\/?$/, "/") + "api/status"' in body
         finally:
             await client.close()
 

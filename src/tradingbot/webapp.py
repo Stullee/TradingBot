@@ -182,15 +182,49 @@ function render(data) {
   document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
 }
 
+// Under HA Ingress this page is served at a per-install path like
+// .../api/hassio_ingress/<token> -- if that URL happens to reach the browser
+// *without* a trailing slash (confirmed live: aiohttp's own access log shows
+// exactly one request all session, "GET /", meaning the Supervisor stripped
+// the ingress prefix down to nothing but never forwarded anything else --
+// consistent with the iframe having navigated to the bare token with no
+// trailing slash), a bare relative fetch("api/status") resolves per the
+// standard last-path-segment-replacement rule and clobbers the token itself
+// -- e.g. ".../hassio_ingress/<token>" + "api/status" => ".../hassio_ingress/
+// api/status", which is a dead path the Supervisor can't route anywhere,
+// silently swallowed before it ever reaches this process (nothing in
+// aiohttp's access log to show for it, matching what was observed live).
+// Building the request path by hand from location.pathname with an explicit
+// trailing slash sidesteps that whole class of resolution surprise instead
+// of depending on the browser's exact URL bar contents.
+var API_STATUS_URL = location.pathname.replace(/\\/?$/, "/") + "api/status";
+
+// A bare fetch() with no timeout just hangs forever on the failure above,
+// leaving the page stuck on "Loading..." with no visible error. Bounding it
+// with AbortController means the page always resolves to *something* --
+// either real data or a visible error -- instead of an indefinite spinner.
+var REFRESH_TIMEOUT_MS = 12000;
+
 function refresh() {
-  fetch("api/status").then(function(r) { return r.json(); }).then(function(data) {
+  var controller = new AbortController();
+  var timedOut = false;
+  var timer = setTimeout(function() { timedOut = true; controller.abort(); }, REFRESH_TIMEOUT_MS);
+  fetch(API_STATUS_URL, { signal: controller.signal }).then(function(r) {
+    clearTimeout(timer);
+    return r.json();
+  }).then(function(data) {
     if (data.error) {
       document.getElementById("app").innerHTML = '<div class="err">' + data.error + "</div>";
       return;
     }
     render(data);
   }).catch(function(err) {
-    document.getElementById("app").innerHTML = '<div class="err">Failed to load status: ' + err + "</div>";
+    clearTimeout(timer);
+    var msg = timedOut
+      ? "No response from the bot after " + (REFRESH_TIMEOUT_MS / 1000) + "s (request may not be " +
+        "reaching it -- check Ingress/network, or try the add-on's direct http://<host>:8099/ URL)."
+      : "Failed to load status: " + err;
+    document.getElementById("app").innerHTML = '<div class="err">' + msg + "</div>";
   });
 }
 

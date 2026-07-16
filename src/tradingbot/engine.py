@@ -259,10 +259,20 @@ class TradingEngine:
             return
 
         signal = self.strategy.generate_signal(enriched)
+        last = enriched.iloc[-1]
+        log.info(
+            "%s: ema_fast=%.4f ema_slow=%.4f rsi=%.1f close=%.2f vwap=%.2f -> %s",
+            symbol,
+            last["ema_fast"],
+            last["ema_slow"],
+            last["rsi"],
+            last["close"],
+            last["vwap"],
+            signal.value,
+        )
         if signal == Signal.FLAT:
             return
 
-        last = enriched.iloc[-1]
         entry_price = float(last["close"])
         atr_value = float(last["atr"])
         stop_dist = atr_value * self.settings.stop_atr_mult

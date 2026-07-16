@@ -60,9 +60,21 @@ your LAN (recommended) or directly on this Home Assistant host.
 ## Live status dashboard
 
 A read-only web dashboard runs alongside the trading engine (same process,
-no extra setup) showing account equity, open positions with unrealized
-P&L, today's realized P&L per symbol, and the news shadow-trading/analysis
-track record — auto-refreshing every 5 seconds. It never places orders.
+no extra setup), auto-refreshing every 5 seconds. It never places orders.
+Shows:
+
+- **Per-symbol signals** — every watched symbol, its current position (if
+  any), the bar strategy's latest LONG/SHORT/FLAT reading and RSI, and the
+  latest news-sentiment reading, all in one table — a "what's this stock
+  doing right now" glance instead of digging through logs.
+- **Open positions** with live unrealized P&L.
+- **Today's realized P&L** per symbol.
+- **Open shadow trades** — any news-driven shadow trade currently being
+  tracked (direction, entry/stop/target, confidence, the headline that
+  triggered it), not just ones that have already closed.
+- **News shadow-trading track record** and **news analysis activity**
+  (batches assessed, direction breakdown, average confidence) — the same
+  persisted history `python -m tradingbot.report` reads.
 
 It shows up as a **panel in the Home Assistant sidebar** (via Ingress) once
 you rebuild to a version with this feature — look for "TradingBot (IB Day

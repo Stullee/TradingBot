@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 
 from ib_async import Contract
 
@@ -92,10 +93,19 @@ class TradingEngine:
         self._flattened_today: dict[str, bool] = {m: False for m in self.symbols_by_market}
         self._last_polled_refresh = 0.0
         self._dashboard_task: asyncio.Task | None = None
+        # Latest bar-strategy indicator/signal snapshot per symbol, read
+        # directly by the live dashboard (webapp.py) -- a plain shared dict
+        # rather than a copy, so dashboard reads always see the current
+        # values with no extra plumbing. Only touched from this event loop
+        # (the tick loop writes, the dashboard's request handler reads),
+        # so no locking is needed.
+        self.latest_signals: dict[str, dict] = {}
 
     async def _run_dashboard_safely(self) -> None:
         try:
-            await run_dashboard(self.broker, self.settings)
+            await run_dashboard(
+                self.broker, self.settings, self.latest_signals, self.news_monitor
+            )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a dashboard failure must never take down trading
@@ -306,6 +316,13 @@ class TradingEngine:
             last["vwap"],
             signal.value,
         )
+        self.latest_signals[symbol] = {
+            "signal": signal.value,
+            "rsi": float(last["rsi"]),
+            "close": float(last["close"]),
+            "vwap": float(last["vwap"]),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
         if signal == Signal.FLAT:
             return
 

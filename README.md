@@ -166,10 +166,12 @@ positions before disconnecting.
 A read-only web dashboard (`ENABLE_DASHBOARD=true` by default) runs
 alongside the engine in the same process — no separate command needed.
 Open `http://localhost:8099/` (or `DASHBOARD_PORT`) while the bot is
-running: account equity, open positions with unrealized P&L, today's
-realized P&L per symbol, and news shadow-trading/analysis stats,
-auto-refreshing every 5 seconds. It never places orders. For a one-shot
-CLI version of the same data instead of a live page:
+running: a per-symbol table (position, latest bar-strategy LONG/SHORT/FLAT
+reading + RSI, latest news-sentiment reading), open positions with
+unrealized P&L, today's realized P&L per symbol, any currently-open
+shadow trades, and news shadow-trading/analysis stats — auto-refreshing
+every 5 seconds. It never places orders. For a one-shot CLI version of the
+same data instead of a live page:
 
 ```bash
 python -m tradingbot.report

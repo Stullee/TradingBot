@@ -141,3 +141,17 @@ def gather_news_analysis_status(path: Path) -> NewsAnalysisStatus:
         avg_confidence=avg_confidence,
         direction_counts=dict(by_direction),
     )
+
+
+def gather_latest_news_by_symbol(path: Path) -> dict[str, dict]:
+    """Most recent real assessment (not a shadow-open skip) per symbol --
+    later records in the append-only journal overwrite earlier ones, so
+    what's left is each symbol's latest reading."""
+    latest: dict[str, dict] = {}
+    for record in read_jsonl(path):
+        if record.get("skipped_reason") is not None:
+            continue
+        symbol = record.get("symbol")
+        if symbol:
+            latest[symbol] = record
+    return latest

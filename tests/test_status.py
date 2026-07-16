@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from tradingbot.status import (
+    gather_latest_news_by_symbol,
     gather_news_analysis_status,
     gather_shadow_trading_status,
     read_jsonl,
@@ -66,3 +67,31 @@ def test_news_analysis_status_separates_skipped_from_assessed(tmp_path):
     assert status.skipped == 1
     assert status.direction_counts == {"LONG": 1, "NONE": 1}
     assert status.avg_confidence == (0.8 + 0.1) / 2
+
+
+def test_latest_news_by_symbol_keeps_only_the_most_recent_per_symbol(tmp_path):
+    path = tmp_path / "news_analysis.jsonl"
+    write_jsonl(
+        path,
+        [
+            {"symbol": "AAPL", "direction": "NONE", "confidence": 0.1, "skipped_reason": None},
+            {"symbol": "AAPL", "direction": "LONG", "confidence": 0.8, "skipped_reason": None},
+            {"symbol": "MSFT", "direction": "SHORT", "confidence": 0.7, "skipped_reason": None},
+        ],
+    )
+    latest = gather_latest_news_by_symbol(path)
+    assert latest["AAPL"]["direction"] == "LONG"  # the later of the two AAPL records
+    assert latest["MSFT"]["direction"] == "SHORT"
+
+
+def test_latest_news_by_symbol_ignores_skipped_records(tmp_path):
+    path = tmp_path / "news_analysis.jsonl"
+    write_jsonl(
+        path,
+        [
+            {"symbol": "AAPL", "direction": "LONG", "confidence": 0.8, "skipped_reason": None},
+            {"symbol": "AAPL", "direction": None, "confidence": None, "skipped_reason": "shadow trade already open"},
+        ],
+    )
+    latest = gather_latest_news_by_symbol(path)
+    assert latest["AAPL"]["direction"] == "LONG"  # the skip doesn't overwrite the real read

@@ -8,21 +8,92 @@ Uses BACKTEST_DURATION (see config.py) for how far back to pull.
 This never places orders or touches the account -- it only requests
 historical data, and connects with a different client id (live client id +
 50) than the live/paper engine so both can run at the same time without IB
-rejecting one for a duplicate client id."""
+rejecting one for a duplicate client id.
+
+Fetches run with bounded concurrency (see _FETCH_CONCURRENCY) to cut wall
+time -- but IB enforces a hard historical-data pacing limit (roughly 60
+requests per rolling 10-minute window per connection) that no amount of
+concurrency can get around, so a full run across a large symbol universe
+still has a floor of several minutes. Concurrency mainly helps by
+overlapping each individual request's network latency instead of paying it
+serially, it doesn't bypass IB's own ceiling."""
 from __future__ import annotations
 
 import asyncio
 import logging
 
 from tradingbot.backtest.fetch import fetch_history
-from tradingbot.backtest.simulator import simulate
+from tradingbot.backtest.simulator import Trade, simulate
 from tradingbot.backtest.stats import summarize
 from tradingbot.broker.connection import BrokerConnection
-from tradingbot.config import load_settings
+from tradingbot.config import Settings, load_settings
 from tradingbot.engine import build_strategy
 from tradingbot.markets import BUILTIN_MARKETS
+from tradingbot.strategy.base import Strategy
+from tradingbot.symbols import SymbolSpec
 
 log = logging.getLogger(__name__)
+
+_FETCH_CONCURRENCY = 5
+
+
+async def _process_symbol(
+    broker: BrokerConnection,
+    strategy: Strategy,
+    settings: Settings,
+    spec: SymbolSpec,
+    sem: asyncio.Semaphore,
+) -> tuple[str, list[Trade]]:
+    """Qualifies + fetches history for one symbol (bounded by `sem` so only
+    _FETCH_CONCURRENCY IB requests are in flight at once), then simulates.
+    Returns (print-ready summary line, trades) -- errors are caught and
+    turned into a line rather than raised, so one bad symbol doesn't cancel
+    the others' already-in-flight requests."""
+    preset = BUILTIN_MARKETS[spec.market]
+    async with sem:
+        try:
+            contract = await broker.qualify_contract(
+                spec.security_type, spec.symbol, spec.exchange, spec.currency
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad symbol must not stop the rest
+            return f"{spec.symbol:8s} SKIPPED: {exc}", []
+
+        is_crypto = spec.security_type == "CRYPTO"
+        try:
+            df = await fetch_history(
+                broker.ib,
+                contract,
+                settings.bar_size,
+                settings.backtest_duration,
+                use_rth=not preset.outside_rth,
+                what_to_show="AGGTRADES" if is_crypto else "TRADES",
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad fetch must not stop the rest
+            return f"{spec.symbol:8s} SKIPPED (history fetch failed): {exc}", []
+
+    if df is None or df.empty:
+        return f"{spec.symbol:8s} no historical data returned", []
+
+    trades = simulate(
+        df,
+        strategy,
+        spec.symbol,
+        settings.ema_fast,
+        settings.ema_slow,
+        settings.rsi_period,
+        settings.atr_period,
+        settings.stop_atr_mult,
+        settings.target_atr_mult,
+        vwap_tz=preset.timezone,
+    )
+    s = summarize(trades)
+    pf = "inf" if s.profit_factor == float("inf") else f"{s.profit_factor:.2f}"
+    line = (
+        f"{spec.symbol:8s} bars={len(df):5d} trades={s.trade_count:3d} "
+        f"win_rate={s.win_rate:5.0%} avg_R={s.avg_r:+.2f} profit_factor={pf} "
+        f"max_dd_R={s.max_drawdown_r:.2f} max_consec_loss={s.max_consecutive_losses}"
+    )
+    return line, trades
 
 
 async def run() -> None:
@@ -39,66 +110,29 @@ async def run() -> None:
     broker = BrokerConnection(backtest_settings)
     await broker.connect_with_retry()
 
-    all_trades = []
+    all_trades: list[Trade] = []
     try:
-        for spec in settings.symbol_specs:
-            preset = BUILTIN_MARKETS[spec.market]
-            try:
-                contract = await broker.qualify_contract(
-                    spec.security_type, spec.symbol, spec.exchange, spec.currency
-                )
-            except Exception as exc:  # noqa: BLE001 - one bad symbol must not stop the rest
-                print(f"{spec.symbol:8s} SKIPPED: {exc}")
-                continue
-
-            is_crypto = spec.security_type == "CRYPTO"
-            try:
-                df = await fetch_history(
-                    broker.ib,
-                    contract,
-                    settings.bar_size,
-                    settings.backtest_duration,
-                    use_rth=not preset.outside_rth,
-                    what_to_show="AGGTRADES" if is_crypto else "TRADES",
-                )
-            except Exception as exc:  # noqa: BLE001 - one bad fetch must not stop the rest
-                print(f"{spec.symbol:8s} SKIPPED (history fetch failed): {exc}")
-                continue
-
-            if df is None or df.empty:
-                print(f"{spec.symbol:8s} no historical data returned")
-                continue
-
-            trades = simulate(
-                df,
-                strategy,
-                spec.symbol,
-                settings.ema_fast,
-                settings.ema_slow,
-                settings.rsi_period,
-                settings.atr_period,
-                settings.stop_atr_mult,
-                settings.target_atr_mult,
-                vwap_tz=preset.timezone,
-            )
+        sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
+        tasks = [
+            asyncio.create_task(_process_symbol(broker, strategy, settings, spec, sem))
+            for spec in settings.symbol_specs
+        ]
+        # as_completed rather than gather: prints progress as each symbol
+        # finishes (order varies run to run) instead of going silent until
+        # everything's done, which matters for a run that can take minutes.
+        for coro in asyncio.as_completed(tasks):
+            line, trades = await coro
+            print(line)
             all_trades.extend(trades)
-            s = summarize(trades)
-            pf = "inf" if s.profit_factor == float("inf") else f"{s.profit_factor:.2f}"
-            print(
-                f"{spec.symbol:8s} bars={len(df):5d} trades={s.trade_count:3d} "
-                f"win_rate={s.win_rate:5.0%} avg_R={s.avg_r:+.2f} profit_factor={pf} "
-                f"max_dd_R={s.max_drawdown_r:.2f} max_consec_loss={s.max_consecutive_losses}"
-            )
     finally:
         broker.disconnect()
 
     print("\n=== Aggregate (all symbols pooled) ===")
     # win_rate/avg_R/profit_factor/sharpe don't depend on order, but
-    # max_drawdown_r and max_consecutive_losses do -- all_trades was built
-    # by appending each symbol's already-time-ordered list one symbol at a
-    # time, not merged chronologically, so sort by exit time first or those
-    # two numbers reflect a nonsensical "all of TSLA's trades, then all of
-    # NVDA's trades, ..." sequence instead of a real cross-symbol timeline.
+    # max_drawdown_r and max_consecutive_losses do -- all_trades was
+    # accumulated in symbol-completion order, not merged chronologically,
+    # so sort by exit time first or those two numbers reflect a nonsensical
+    # sequence instead of a real cross-symbol timeline.
     all_trades.sort(key=lambda t: t.exit_time)
     overall = summarize(all_trades)
     pf = "inf" if overall.profit_factor == float("inf") else f"{overall.profit_factor:.2f}"

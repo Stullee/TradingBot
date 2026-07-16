@@ -31,17 +31,25 @@ class OrderManager:
 
         exit_action = "SELL" if action == "BUY" else "BUY"
 
+        # tif is set explicitly (rather than left blank) because IB silently
+        # cancels API orders whose parameters get auto-corrected against the
+        # account's order presets (e.g. blank TIF -> DAY) instead of just
+        # adjusting them, unless "Bypass Order Precautions for API Orders" is
+        # enabled in TWS/Gateway's API precaution settings.
         parent = MarketOrder(action, quantity)
         parent.transmit = False
         parent.outsideRth = outside_rth
+        parent.tif = "DAY"
 
         take_profit = LimitOrder(exit_action, quantity, round(target_price, 2))
         take_profit.transmit = False
         take_profit.outsideRth = outside_rth
+        take_profit.tif = "DAY"
 
         stop_loss = StopOrder(exit_action, quantity, round(stop_price, 2))
         stop_loss.transmit = True
         stop_loss.outsideRth = outside_rth
+        stop_loss.tif = "DAY"
 
         parent_trade = self.ib.placeOrder(contract, parent)
         parent.orderId = parent_trade.order.orderId
@@ -73,6 +81,7 @@ class OrderManager:
 
         action = "SELL" if position_qty > 0 else "BUY"
         order = MarketOrder(action, abs(position_qty))
+        order.tif = "DAY"
         trade = self.ib.placeOrder(contract, order)
         log.warning("Flattening %s: %s %d @ market", contract.symbol, action, abs(position_qty))
         return trade

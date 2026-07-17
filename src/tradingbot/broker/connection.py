@@ -29,6 +29,7 @@ class BrokerConnection:
         self._realized_pnl_persist_path: Path | None = None
         self.ib.updatePortfolioEvent += self._on_portfolio_update
         self._closing = False
+        self._reconnect_task: asyncio.Task | None = None
 
     def enable_realized_pnl_persistence(self, path: Path) -> None:
         """Opt-in: loads any realized P&L persisted by a previous run of
@@ -101,8 +102,19 @@ class BrokerConnection:
     def _on_disconnected(self) -> None:
         if self._closing:
             return
+        # ib_async's disconnectedEvent firing a second time before the first
+        # reconnect attempt has finished (e.g. a connect that succeeds only
+        # to immediately get kicked -- confirmed live: "Peer closed
+        # connection. clientId 17 already in use?" seconds after a
+        # successful reconnect) would otherwise spawn a second
+        # connect_with_retry() loop racing the first one to reconnect with
+        # the same clientId, which is exactly the kind of collision that
+        # message describes. Only one reconnect loop may be in flight at a
+        # time.
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
         log.warning("Lost connection to IB. Will attempt to reconnect...")
-        asyncio.ensure_future(self.connect_with_retry())
+        self._reconnect_task = asyncio.ensure_future(self.connect_with_retry())
 
     async def qualify_contract(
         self, security_type: str, symbol: str, exchange: str, currency: str

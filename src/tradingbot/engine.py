@@ -99,7 +99,11 @@ class TradingEngine:
             max_position_pct=settings.max_position_pct,
         )
         self.contracts: dict[str, Contract] = {}
-        self._bar_counts: dict[str, int] = {}
+        # The newest bar's own start-timestamp per symbol, last seen by
+        # _process_symbol -- None means no bar has been processed yet. Used
+        # to detect a genuinely new closed bar; see _process_symbol's
+        # docstring comment for why this must be a timestamp, not a bar count.
+        self._last_bar_start: dict[str, object] = {}
         self.news_monitor: NewsMonitor | None = None
         self.base_currency = "USD"
 
@@ -118,6 +122,10 @@ class TradingEngine:
             for market_name in self.symbols_by_market
         }
         self._flattened_today: dict[str, bool] = {m: False for m in self.symbols_by_market}
+        # UTC calendar date the risk manager's daily-loss baseline was last
+        # reset for -- see _tick()'s rollover check. Set for real in start();
+        # None here is just a placeholder before that runs.
+        self._trading_day: object = None
         self._last_polled_refresh = 0.0
         self._last_stale_check = 0.0
         self._last_resubscribe_attempt: dict[str, float] = {}
@@ -176,7 +184,7 @@ class TradingEngine:
                 continue
 
             self.contracts[spec.symbol] = contract
-            self._bar_counts[spec.symbol] = 0
+            self._last_bar_start[spec.symbol] = None
 
         if not self.contracts:
             raise RuntimeError(
@@ -186,6 +194,7 @@ class TradingEngine:
         await asyncio.sleep(2)  # let the first snapshot of bars arrive
         equity = self.broker.account_net_liquidation()
         self.base_currency = self.broker.account_base_currency()
+        self._trading_day = datetime.now(timezone.utc).date()
         self.risk.start_new_session(equity)
         self.broker.enable_realized_pnl_persistence(
             Path(self.settings.log_dir) / "realized_pnl.json"
@@ -274,6 +283,23 @@ class TradingEngine:
             await self._check_stale_bars()
 
         equity = self.broker.account_net_liquidation()
+
+        # RiskManager.start_new_session() latches a starting-equity baseline
+        # (and clears the kill switch) once, at connect time -- it never
+        # re-fires on its own. Left alone, "daily" loss tracking silently
+        # becomes "loss since this process last restarted": on a bot that
+        # now deliberately stays up for many hours (crypto's warmup, riding
+        # out IB reconnects) rather than restarting every day, that drifts
+        # further from "today's" P&L the longer it runs, and a kill switch
+        # tripped on day 1 would stay latched forever rather than clearing
+        # for day 2. A plain UTC-date rollover is the one boundary that's
+        # unambiguous across a bot spanning multiple markets/timezones at
+        # once, unlike any single market's own local session close.
+        today = datetime.now(timezone.utc).date()
+        if today != self._trading_day:
+            self._trading_day = today
+            self.risk.start_new_session(equity)
+            log.info("New UTC trading day (%s): risk manager session reset, equity=%.2f", today, equity)
 
         if self.risk.check_daily_loss_limit(equity):
             self.orders.flatten_all()
@@ -402,10 +428,22 @@ class TradingEngine:
         if df is None or df.empty:
             return
 
-        bar_count = len(df)
-        if bar_count <= self._bar_counts[symbol]:
+        # Keyed off the newest bar's own timestamp, not len(df) -- a
+        # resubscribe/refresh (bars.resubscribe_live, refresh_polled) replaces
+        # the whole bar list wholesale rather than appending to it, so its
+        # length can just as easily go *down* as up (confirmed: a fresh "1 D"
+        # pull right at a session's open returns far fewer bars than the
+        # prior session's full count). Comparing lengths meant that dip
+        # looked identical to "no new bar yet" forever after -- this symbol
+        # would silently stop getting new signals until its bar count
+        # organically regrew past the old high-water mark, with no error or
+        # warning logged anywhere. A timestamp only ever moves forward in
+        # real time regardless of how the underlying list was rebuilt.
+        latest_bar_start = df.index[-1]
+        last_seen = self._last_bar_start[symbol]
+        if last_seen is not None and latest_bar_start <= last_seen:
             return  # still waiting for the current bar to close
-        self._bar_counts[symbol] = bar_count
+        self._last_bar_start[symbol] = latest_bar_start
 
         closed = df.iloc[:-1]  # exclude the still-forming last bar
         if len(closed) < self.strategy.min_bars:

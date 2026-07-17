@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from ib_async import Stock
@@ -8,6 +9,45 @@ from tradingbot.config import Settings
 
 def make_broker() -> BrokerConnection:
     return BrokerConnection(Settings(ib_port=7497, symbols="AAPL"))
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def test_disconnected_does_not_spawn_a_second_overlapping_reconnect_loop():
+    """The bug this guards against: ib_async's disconnectedEvent firing a
+    second time before the first reconnect attempt has finished (confirmed
+    live: a reconnect that succeeds only to immediately get kicked with
+    "clientId 17 already in use?" seconds later) used to spawn a second
+    connect_with_retry() loop racing the first one to reconnect with the
+    same clientId -- exactly the kind of collision that message describes."""
+    broker = make_broker()
+    call_count = 0
+    release = asyncio.Event()
+
+    async def fake_connect_with_retry(max_delay=60):
+        nonlocal call_count
+        call_count += 1
+        await release.wait()
+
+    broker.connect_with_retry = fake_connect_with_retry
+
+    async def scenario():
+        broker._on_disconnected()
+        await asyncio.sleep(0)  # let the first reconnect task start running
+        broker._on_disconnected()  # fires again before it has resolved
+        await asyncio.sleep(0)
+        assert call_count == 1  # second call was a no-op, not a new task
+
+        release.set()
+        await broker._reconnect_task  # let the first attempt finish
+
+        broker._on_disconnected()  # first loop is done -- safe to spawn a new one
+        await asyncio.sleep(0)
+        assert call_count == 2
+
+    run(scenario())
 
 
 def test_realized_pnl_survives_position_flattening_to_zero():

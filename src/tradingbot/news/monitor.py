@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +39,23 @@ _FINNHUB_REQUEST_GAP_SEC = 1.1
 # rest simply stay unseen and get picked up (still capped) on subsequent
 # polls, spreading a one-time backlog out instead of dumping it all at once.
 _MAX_ARTICLES_PER_BATCH = 10
+
+
+@dataclass
+class PendingAssessment:
+    """A qualifying (direction != NONE, confidence above threshold)
+    assessment that couldn't open a shadow trade the moment it arrived --
+    either a trade was already open for that symbol, or its market was
+    closed -- kept so it can be acted on later without re-billing Claude for
+    the same article twice. Discarded once acted on, or once it's aged past
+    news_max_hold_min without an opportunity to act (old news isn't worth
+    reopening the same way a freshly-assessed one is)."""
+
+    direction: str
+    confidence: float
+    rationale: str
+    headline: str
+    assessed_at: str  # ISO
 
 
 class NewsMonitor:
@@ -76,20 +94,42 @@ class NewsMonitor:
             log_path=Path(settings.log_dir) / "shadow_trades.jsonl",
             max_hold_min=settings.news_max_hold_min,
         )
-        # Every article's outcome gets persisted here -- both the actual
-        # Claude assessment (direction/confidence/rationale) and articles
-        # skipped without calling Claude at all (a shadow trade was already
-        # open for that symbol). Two things this fixes vs. an in-memory-only
-        # seen-set: (1) a restart doesn't forget what's already been
-        # assessed -- Finnhub is polled with a 1-day lookback every cycle
-        # regardless of restarts, so forgetting meant every restart
-        # re-billed Claude for the whole rolling backlog in one burst, which
-        # is what was actually draining API credits fast, not the poll
-        # interval; (2) you get a readable, queryable record of every
-        # analysis instead of only ephemeral log lines.
+        # Every article gets assessed by Claude exactly once and persisted
+        # here, regardless of whether a shadow trade could open right away --
+        # an article is never re-billed to Claude a second time. Two things
+        # this fixes vs. an in-memory-only seen-set: (1) a restart doesn't
+        # forget what's already been assessed -- Finnhub is polled with a
+        # 1-day lookback every cycle regardless of restarts, so forgetting
+        # meant every restart re-billed Claude for the whole rolling backlog
+        # in one burst, which is what was actually draining API credits
+        # fast, not the poll interval; (2) you get a readable, queryable
+        # record of every analysis instead of only ephemeral log lines.
         self._analysis_log_path = Path(settings.log_dir) / "news_analysis.jsonl"
         self._seen_article_ids: set[int] = self._load_seen_ids()
+        # A qualifying assessment that couldn't open a shadow trade the
+        # moment it arrived (see PendingAssessment) -- retried every tick in
+        # _update_open_shadow_trades once whatever blocked it clears, instead
+        # of being thrown away and never reconsidered. Mirrors
+        # ShadowTradeTracker's own open_trades snapshot: persisted so a
+        # restart doesn't lose a pending opportunity either.
+        self._pending_path = Path(settings.log_dir) / "pending_assessments.json"
+        self._pending: dict[str, PendingAssessment] = self._load_pending()
         self._last_poll_monotonic: float = 0.0
+
+    def _load_pending(self) -> dict[str, PendingAssessment]:
+        if not self._pending_path.exists():
+            return {}
+        try:
+            raw = json.loads(self._pending_path.read_text())
+            return {symbol: PendingAssessment(**fields) for symbol, fields in raw.items()}
+        except (json.JSONDecodeError, OSError, TypeError):
+            log.warning("Could not read %s, starting with no pending assessments.", self._pending_path)
+            return {}
+
+    def _write_pending(self) -> None:
+        self._pending_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot = {symbol: asdict(p) for symbol, p in self._pending.items()}
+        self._pending_path.write_text(json.dumps(snapshot))
 
     def _load_seen_ids(self) -> set[int]:
         if not self._analysis_log_path.exists():
@@ -111,22 +151,21 @@ class NewsMonitor:
         symbol: str,
         article_ids: list[int],
         headlines: list[str],
-        assessment: NewsAssessment | None,
-        skipped_reason: str = "shadow trade already open for this symbol",
+        assessment: NewsAssessment,
     ) -> None:
         """Marks these article ids seen (never re-assessed again, even
-        across a restart) and appends a record of what happened -- either a
-        real assessment, or why one was skipped without calling Claude."""
+        across a restart) and appends a record of the assessment. Every
+        article gets a real assessment now -- see PendingAssessment for what
+        happens if it can't open a shadow trade right away."""
         self._seen_article_ids.update(article_ids)
         record = {
             "symbol": symbol,
             "article_ids": article_ids,
             "headlines": headlines,
             "assessed_at": datetime.now(timezone.utc).isoformat(),
-            "skipped_reason": None if assessment else skipped_reason,
-            "direction": assessment.direction if assessment else None,
-            "confidence": assessment.confidence if assessment else None,
-            "rationale": assessment.rationale if assessment else None,
+            "direction": assessment.direction,
+            "confidence": assessment.confidence,
+            "rationale": assessment.rationale,
         }
         self._analysis_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self._analysis_log_path.open("a") as f:
@@ -137,6 +176,7 @@ class NewsMonitor:
         cheap and always run; the expensive news poll (external API calls)
         only actually fires every news_poll_interval_sec."""
         self._update_open_shadow_trades()
+        self._retry_pending_assessments()
 
         now = time.monotonic()
         if now - self._last_poll_monotonic < self.settings.news_poll_interval_sec:
@@ -177,6 +217,77 @@ class NewsMonitor:
                 continue
 
             self.shadow.update(symbol, price)
+
+    def _retry_pending_assessments(self) -> None:
+        """Called every tick alongside _update_open_shadow_trades -- for
+        each symbol with a still-pending assessment (see PendingAssessment),
+        tries again to open a shadow trade from it now that whatever blocked
+        it earlier (an already-open trade, a closed market) may have
+        cleared, instead of only ever getting one shot at the moment the
+        article first arrived."""
+        for symbol in list(self._pending):
+            self._try_open_pending(symbol)
+
+    def _try_open_pending(self, symbol: str) -> None:
+        pending = self._pending.get(symbol)
+        if pending is None:
+            return
+        if self.shadow.has_open(symbol):
+            return
+        if not self._is_market_open(symbol):
+            return
+
+        assessed_at = datetime.fromisoformat(pending.assessed_at)
+        age_min = (datetime.now(timezone.utc) - assessed_at).total_seconds() / 60
+        if age_min > self.settings.news_max_hold_min:
+            log.info(
+                "%s: pending %s assessment (confidence=%.2f) aged out after %.0f min "
+                "without an opportunity to act on it, discarding.",
+                symbol,
+                pending.direction,
+                pending.confidence,
+                age_min,
+            )
+            del self._pending[symbol]
+            self._write_pending()
+            return
+
+        df = self.bars.dataframe(symbol)
+        if df is None or len(df) < self.settings.atr_period + 2:
+            return  # not enough bar history yet -- try again next tick
+
+        enriched = add_indicators(
+            df,
+            self.settings.ema_fast,
+            self.settings.ema_slow,
+            self.settings.rsi_period,
+            self.settings.atr_period,
+        )
+        last = enriched.iloc[-1]
+        entry_price = float(last["close"])
+        atr_value = float(last["atr"])
+        stop_dist = atr_value * self.settings.stop_atr_mult
+        target_dist = atr_value * self.settings.target_atr_mult
+
+        if pending.direction == "LONG":
+            stop_price = entry_price - stop_dist
+            target_price = entry_price + target_dist
+        else:
+            stop_price = entry_price + stop_dist
+            target_price = entry_price - target_dist
+
+        self.shadow.open(
+            symbol,
+            pending.direction,
+            entry_price,
+            stop_price,
+            target_price,
+            headline=pending.headline,
+            confidence=pending.confidence,
+            rationale=pending.rationale,
+        )
+        del self._pending[symbol]
+        self._write_pending()
 
     async def _poll_news(self) -> None:
         symbols_with_new_articles = 0
@@ -225,28 +336,18 @@ class NewsMonitor:
         headline), so e.g. a mix of good and bad news nets out sensibly
         instead of each piece being judged with no awareness of the others.
         This also directly cuts API call volume on days with multiple
-        articles about the same stock."""
+        articles about the same stock.
+
+        Always assesses, regardless of whether a shadow trade could open
+        right now -- an article is billed to Claude exactly once, ever,
+        whether or not the moment turns out to be actionable. If it can't
+        open immediately (a trade's already open for this symbol, or its
+        market is closed), a qualifying assessment is kept as a pending
+        candidate (see PendingAssessment) and retried on later ticks
+        instead of being thrown away and never reconsidered once whatever
+        blocked it clears."""
         article_ids = [a["id"] for a in articles]
         headlines = [a.get("headline", "") for a in articles]
-
-        if self.shadow.has_open(symbol):
-            self._persist_seen(symbol, article_ids, headlines, assessment=None)
-            return  # one shadow trade per symbol at a time, keeps evaluation simple
-
-        if not self._is_market_open(symbol):
-            # A shadow trade opens at the last available bar's close --
-            # meaningless (and misleading for the win-rate/avg-R stats this
-            # is meant to inform) if that "current price" is actually hours
-            # stale because the symbol's market is closed. Skipped here,
-            # before the Claude call, not just before shadow.open(), so a
-            # news hit outside trading hours doesn't cost an assessment call
-            # for a trade that was never going to open anyway.
-            log.info("%s: market closed, skipping news assessment.", symbol)
-            self._persist_seen(
-                symbol, article_ids, headlines, assessment=None,
-                skipped_reason="market closed for this symbol",
-            )
-            return
 
         assessment = await self.analyzer.assess(symbol, articles)
         self._persist_seen(symbol, article_ids, headlines, assessment)
@@ -265,41 +366,15 @@ class NewsMonitor:
         if assessment.confidence < self.settings.news_confidence_threshold:
             return
 
-        df = self.bars.dataframe(symbol)
-        if df is None or len(df) < self.settings.atr_period + 2:
-            log.info("%s: not enough bar history yet to size a shadow trade, skipping.", symbol)
-            return
-
-        enriched = add_indicators(
-            df,
-            self.settings.ema_fast,
-            self.settings.ema_slow,
-            self.settings.rsi_period,
-            self.settings.atr_period,
-        )
-        last = enriched.iloc[-1]
-        entry_price = float(last["close"])
-        atr_value = float(last["atr"])
-        stop_dist = atr_value * self.settings.stop_atr_mult
-        target_dist = atr_value * self.settings.target_atr_mult
-
-        if assessment.direction == "LONG":
-            stop_price = entry_price - stop_dist
-            target_price = entry_price + target_dist
-        else:
-            stop_price = entry_price + stop_dist
-            target_price = entry_price - target_dist
-
-        self.shadow.open(
-            symbol,
-            assessment.direction,
-            entry_price,
-            stop_price,
-            target_price,
-            headline="; ".join(headlines),
+        self._pending[symbol] = PendingAssessment(
+            direction=assessment.direction,
             confidence=assessment.confidence,
             rationale=assessment.rationale,
+            headline="; ".join(headlines),
+            assessed_at=datetime.now(timezone.utc).isoformat(),
         )
+        self._write_pending()
+        self._try_open_pending(symbol)
 
     async def aclose(self) -> None:
         await self.finnhub.aclose()

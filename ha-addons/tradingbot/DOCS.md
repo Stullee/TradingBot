@@ -162,11 +162,13 @@ When `enable_news_monitor` is on, the add-on additionally polls Finnhub for
 news on your configured symbols, has Claude assess whether each new article
 is likely to move the price, and — above `news_confidence_threshold` —
 **simulates** a hypothetical trade using the same ATR stop/target sizing as
-the real strategy. It logs the outcome (win/loss/timeout, R-multiple) to
-`/data/logs/shadow_trades.jsonl`. Any still-open shadow trade is also
-mirrored to `/data/logs/open_shadow_trades.json` and restored from there on
-startup, so a restart (add-on rebuild included) doesn't silently drop a
-trade that was still in flight.
+the real strategy. It logs the outcome (win/loss/timeout, or flattened at
+its market's close, with an R-multiple) to `/data/logs/shadow_trades.jsonl`.
+Any still-open shadow trade is also mirrored to
+`/data/logs/open_shadow_trades.json`, and any qualifying assessment that
+couldn't open one yet to `/data/logs/pending_assessments.json` -- both
+restored on startup, so a restart (add-on rebuild included) doesn't
+silently drop a trade in flight or a pending opportunity.
 
 **This never places real orders.** It exists purely to let you evaluate
 whether the news-sentiment signal would have been profitable, before ever
@@ -176,10 +178,13 @@ considering wiring it to real execution.
 symbol per poll interval, and one Anthropic API call per symbol per poll
 *only if* it has new (unseen) articles, batching all of that poll's new
 articles about the same stock into a single call rather than one call per
-headline. Keep `news_poll_interval_sec` reasonable (the default is 5
-minutes) to avoid surprises on both providers' usage/rate limits. Every
-article's outcome (real assessment, or skipped because a shadow trade was
-already open for that symbol) is persisted to
+headline. Every new article gets exactly one Claude call, ever, whether or
+not a shadow trade can open right away — if it can't (a trade's already
+open for that symbol, or its market is closed), a qualifying assessment is
+kept as a pending candidate and retried on later ticks once that clears,
+instead of being skipped and lost. Keep `news_poll_interval_sec` reasonable
+(the default is 5 minutes) to avoid surprises on both providers' usage/rate
+limits. Every article's assessment is persisted to
 `/data/logs/news_analysis.jsonl`, so a restart doesn't reprocess (and
 re-bill) the same day's news backlog again — before this was fixed, every
 restart re-assessed everything Finnhub's 1-day lookback returned as "new,"

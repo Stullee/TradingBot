@@ -1,11 +1,12 @@
 import asyncio
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pandas as pd
 
-from tradingbot.news.monitor import NewsMonitor
+from tradingbot.news.monitor import NewsMonitor, PendingAssessment
 from tradingbot.news.sentiment import NewsAssessment
 
 
@@ -15,8 +16,15 @@ def make_settings(tmp_path, **overrides):
         anthropic_api_key="an-key",
         news_model="claude-haiku-4-5-20251001",
         news_max_hold_min=240,
+        news_confidence_threshold=0.6,
         log_dir=str(tmp_path),
         symbol_list=["AAPL"],
+        ema_fast=9,
+        ema_slow=21,
+        rsi_period=14,
+        atr_period=14,
+        stop_atr_mult=1.5,
+        target_atr_mult=2.5,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -44,10 +52,15 @@ class FakeAnalyzer:
 
 class FakeShadow:
     def __init__(self, open_symbols: set[str] | None = None):
-        self.open_symbols = open_symbols or set()
+        self.open_symbols = set(open_symbols or set())
+        self.open_calls: list[tuple] = []
 
     def has_open(self, symbol):
         return symbol in self.open_symbols
+
+    def open(self, symbol, direction, entry_price, stop_price, target_price, **kwargs):
+        self.open_symbols.add(symbol)
+        self.open_calls.append((symbol, direction, entry_price, stop_price, target_price))
 
 
 def test_no_seen_ids_file_yet_starts_empty(tmp_path):
@@ -83,17 +96,6 @@ def test_persist_seen_writes_full_assessment_record(tmp_path):
     assert record["article_ids"] == [1]
     assert record["direction"] == "LONG"
     assert record["confidence"] == 0.8
-    assert record["skipped_reason"] is None
-
-
-def test_persist_seen_records_skip_reason_without_an_assessment(tmp_path):
-    monitor = NewsMonitor(make_settings(tmp_path), bars=None)
-    monitor._persist_seen("AAPL", [1], ["headline"], assessment=None)
-
-    lines = monitor._analysis_log_path.read_text().strip().splitlines()
-    record = json.loads(lines[0])
-    assert record["direction"] is None
-    assert "shadow trade already open" in record["skipped_reason"]
 
 
 def test_poll_news_paces_requests_and_skips_gap_before_the_first(tmp_path, monkeypatch):
@@ -182,46 +184,118 @@ def test_large_backlog_is_capped_and_deferred_not_dumped_in_one_call(tmp_path):
     assert monitor._seen_article_ids == set(range(16, 26))
 
 
-def test_no_analyzer_call_when_shadow_trade_already_open(tmp_path):
-    """Saves the API call entirely (not just skips opening a new shadow
-    trade) -- has_open() is checked before assess(), not after."""
+def test_analyzer_is_still_called_when_shadow_trade_already_open(tmp_path):
+    """The bug this guards against: an article that arrives while a shadow
+    trade is already open used to be skipped before ever calling Claude --
+    marked seen and never reconsidered, even after that trade later closed
+    and the symbol was free again. It's now assessed once regardless (an
+    article is billed to Claude exactly once, ever) and kept as a pending
+    candidate instead of being thrown away."""
     articles = [{"id": 1, "headline": "headline"}]
     settings = make_settings(tmp_path, symbol_list=["AAPL"])
     monitor = NewsMonitor(settings, bars=None)
     monitor.finnhub = FakeFinnhub({"AAPL": articles})
     monitor.shadow = FakeShadow(open_symbols={"AAPL"})
-    fake_analyzer = FakeAnalyzer()
+    fake_analyzer = FakeAnalyzer(NewsAssessment("LONG", 0.8, "strong beat"))
     monitor.analyzer = fake_analyzer
 
     asyncio.run(monitor._poll_news())
 
-    assert fake_analyzer.calls == []
-    assert monitor._seen_article_ids == {1}  # still marked seen, just never billed
+    assert len(fake_analyzer.calls) == 1  # assessed despite the open trade
+    assert monitor._seen_article_ids == {1}
+    assert monitor.shadow.open_calls == []  # but not opened -- one trade per symbol at a time
+    assert "AAPL" in monitor._pending  # kept, not discarded
 
 
-def test_no_shadow_trade_or_analyzer_call_when_market_is_closed(tmp_path):
+def test_assessment_becomes_pending_when_market_is_closed(tmp_path):
     """A news hit for a symbol whose market is currently closed must not
-    spend a Claude call or open a shadow trade at whatever price its last
-    bar happened to close at -- that price could be hours stale (the bug
-    this guards against: an EU symbol's shadow trade opened using its
-    pre-close price, hours after that market had actually closed)."""
+    open a shadow trade at whatever price its last bar happened to close at
+    -- that price could be hours stale (the bug this guards against: an EU
+    symbol's shadow trade opened using its pre-close price, hours after
+    that market had actually closed). It's still assessed once, though, and
+    kept pending for the market's next open."""
     articles = [{"id": 1, "headline": "headline"}]
     settings = make_settings(tmp_path, symbol_list=["ASML"])
     monitor = NewsMonitor(settings, bars=None, is_market_open=lambda symbol: False)
     monitor.finnhub = FakeFinnhub({"ASML": articles})
     monitor.shadow = FakeShadow()
-    fake_analyzer = FakeAnalyzer()
+    fake_analyzer = FakeAnalyzer(NewsAssessment("LONG", 0.8, "strong beat"))
     monitor.analyzer = fake_analyzer
 
     asyncio.run(monitor._poll_news())
 
-    assert fake_analyzer.calls == []
-    assert monitor._seen_article_ids == {1}  # still marked seen, just never billed
+    assert len(fake_analyzer.calls) == 1
+    assert monitor._seen_article_ids == {1}
+    assert monitor.shadow.open_calls == []
+    assert "ASML" in monitor._pending
 
-    lines = monitor._analysis_log_path.read_text().strip().splitlines()
-    record = json.loads(lines[0])
-    assert record["direction"] is None
-    assert "market closed" in record["skipped_reason"]
+
+class FakeOhlcvBars:
+    """Unlike FakeBars, provides enough real OHLCV rows for add_indicators
+    (used by _try_open_pending to size a shadow trade)."""
+
+    def __init__(self, closes: dict[str, float], n: int = 20):
+        self.frames = {
+            symbol: pd.DataFrame(
+                {"open": [c] * n, "high": [c] * n, "low": [c] * n, "close": [c] * n, "volume": [1] * n},
+                index=pd.date_range("2026-07-16 09:00", periods=n, freq="5min", tz="UTC"),
+            )
+            for symbol, c in closes.items()
+        }
+
+    def dataframe(self, symbol):
+        return self.frames.get(symbol)
+
+
+def test_pending_assessment_opens_once_the_market_is_open_again(tmp_path):
+    """The actual point of caching the assessment: once whatever blocked it
+    clears (here, the market opening), a later tick opens the trade from
+    the cached assessment without calling Claude a second time."""
+    settings = make_settings(tmp_path, symbol_list=["ASML"])
+    is_open = {"value": False}
+    monitor = NewsMonitor(
+        settings, bars=FakeOhlcvBars({"ASML": 700.0}), is_market_open=lambda symbol: is_open["value"]
+    )
+    monitor.finnhub = FakeFinnhub({"ASML": [{"id": 1, "headline": "headline"}]})
+    monitor.shadow = FakeShadow()
+    fake_analyzer = FakeAnalyzer(NewsAssessment("LONG", 0.8, "strong beat"))
+    monitor.analyzer = fake_analyzer
+
+    asyncio.run(monitor._poll_news())
+    assert monitor.shadow.open_calls == []
+    assert len(fake_analyzer.calls) == 1
+
+    is_open["value"] = True
+    monitor._retry_pending_assessments()
+
+    assert len(monitor.shadow.open_calls) == 1
+    assert monitor.shadow.open_calls[0][0:2] == ("ASML", "LONG")
+    assert "ASML" not in monitor._pending  # consumed, not retried again
+    assert len(fake_analyzer.calls) == 1  # still never billed twice
+
+
+def test_pending_assessment_ages_out_without_ever_becoming_actionable(tmp_path):
+    """An assessment that's been blocked long enough to exceed
+    news_max_hold_min is stale news by the time it could act -- discarded
+    rather than opened against a market that's moved on."""
+    settings = make_settings(tmp_path, symbol_list=["AAPL"], news_max_hold_min=60)
+    monitor = NewsMonitor(
+        settings, bars=FakeBars({"AAPL": 200.0}), is_market_open=lambda symbol: True
+    )
+    monitor.shadow = FakeShadow()
+    old_assessment = PendingAssessment(
+        direction="LONG",
+        confidence=0.8,
+        rationale="old news",
+        headline="old headline",
+        assessed_at=(datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat(),
+    )
+    monitor._pending["AAPL"] = old_assessment
+
+    monitor._retry_pending_assessments()
+
+    assert monitor.shadow.open_calls == []
+    assert "AAPL" not in monitor._pending
 
 
 def test_market_open_check_defaults_to_always_open(tmp_path):

@@ -73,8 +73,8 @@ def _print_shadow_trading(status: ShadowTradingStatus, path: Path) -> None:
         return
     print(
         f"Closed: {status.closed}  Win: {status.wins}  Loss: {status.losses}  "
-        f"Timeout: {status.timeouts}  Win rate: {status.win_rate:.0%}  "
-        f"Avg R: {status.avg_r:+.2f}\n"
+        f"Timeout: {status.timeouts}  Flattened: {status.flattened}  "
+        f"Win rate: {status.win_rate:.0%}  Avg R: {status.avg_r:+.2f}\n"
     )
 
 

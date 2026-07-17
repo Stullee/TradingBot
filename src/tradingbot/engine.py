@@ -201,7 +201,12 @@ class TradingEngine:
         )
 
         if self.settings.enable_news_monitor:
-            self.news_monitor = NewsMonitor(self.settings, self.bars, self._is_symbol_market_open)
+            self.news_monitor = NewsMonitor(
+                self.settings,
+                self.bars,
+                self._is_symbol_market_open,
+                self._should_flatten_shadow_trade,
+            )
             log.info("News sentiment shadow-trading enabled (observation only).")
 
         if self.settings.enable_dashboard:
@@ -269,6 +274,28 @@ class TradingEngine:
         if session is None:
             return False
         return session.is_open()
+
+    def _should_flatten_shadow_trade(self, symbol: str, opened_at: str) -> bool:
+        """Passed into NewsMonitor so an open shadow trade gets force-closed
+        with the same no-overnight-risk discipline real positions get via
+        session.should_flatten(), instead of just sitting open until it
+        happens to hit stop/target/timeout (confirmed live: trades still
+        open from the previous day). Also catches a trade that already
+        carried over from an earlier calendar day than this check existed --
+        should_flatten() alone only fires once *today's* window is reached,
+        which could be many hours away; a trade opened on a prior day (in
+        its own market's local timezone) already should have been flattened
+        at least once by now and just never was."""
+        spec = self.spec_by_symbol.get(symbol)
+        if spec is None:
+            return True  # unknown session -- fail safe, don't hold indefinitely
+        session = self.market_sessions.get(spec.market)
+        if session is None:
+            return True
+        if session.should_flatten():
+            return True
+        opened_local_date = datetime.fromisoformat(opened_at).astimezone(session.tz).date()
+        return opened_local_date < session.now_local().date()
 
     async def _tick(self) -> None:
         now = time.monotonic()

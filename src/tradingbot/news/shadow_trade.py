@@ -29,7 +29,7 @@ class ShadowTrade:
     headline: str
     confidence: float
     rationale: str
-    status: str = "OPEN"  # OPEN | WIN | LOSS | TIMEOUT
+    status: str = "OPEN"  # OPEN | WIN | LOSS | TIMEOUT | FLATTENED
     closed_at: str | None = None
     exit_price: float | None = None
     r_multiple: float | None = None
@@ -128,6 +128,20 @@ class ShadowTradeTracker:
             confidence,
             headline,
         )
+
+    def flatten(self, symbol: str, price: float, now: datetime | None = None) -> None:
+        """Force-closes an open shadow trade at `price` -- mirrors real
+        positions getting flattened before their market's close (or, for a
+        trade that's carried over from an earlier calendar day than this
+        check existed, closed the first time it's noticed) instead of
+        riding overnight/across sessions indefinitely. A trade held past a
+        close it should never have seen isn't a meaningful WIN/LOSS/TIMEOUT
+        outcome -- it's an artifact of a discipline gap, not a real exit."""
+        trade = self.open_trades.get(symbol)
+        if trade is None:
+            return
+        now = now or datetime.now(timezone.utc)
+        self._close(trade, "FLATTENED", price, now)
 
     def update(self, symbol: str, current_price: float, now: datetime | None = None) -> None:
         trade = self.open_trades.get(symbol)

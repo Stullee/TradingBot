@@ -161,9 +161,11 @@ function render(data) {
   if (!data.shadow.closed) {
     html += '<div class="empty">No shadow trades closed yet.</div>';
   } else {
-    html += "<table><tr><th>Closed</th><th>Win</th><th>Loss</th><th>Timeout</th><th>Win rate</th><th>Avg R</th></tr><tr><td>" +
+    html += "<table><tr><th>Closed</th><th>Win</th><th>Loss</th><th>Timeout</th><th>Flattened</th>" +
+      "<th>Win rate</th><th>Avg R</th></tr><tr><td>" +
       data.shadow.closed + "</td><td>" + data.shadow.wins + "</td><td>" + data.shadow.losses +
-      "</td><td>" + data.shadow.timeouts + "</td><td>" + Math.round(data.shadow.win_rate * 100) +
+      "</td><td>" + data.shadow.timeouts + "</td><td>" + data.shadow.flattened + "</td><td>" +
+      Math.round(data.shadow.win_rate * 100) +
       "%</td><td class=\\"" + cls(data.shadow.avg_r) + "\\">" + fmt(data.shadow.avg_r, 2) + "</td></tr></table>";
   }
 

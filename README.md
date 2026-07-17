@@ -261,7 +261,10 @@ confidence assessment (`src/tradingbot/news/sentiment.py`), and — above
 ATR stop/target rules as the real strategy (`src/tradingbot/news/shadow_trade.py`).
 It's tracked against the bot's own live bar data until the stop, the target,
 or `NEWS_MAX_HOLD_MIN` is hit, then logged as a win/loss/timeout with an
-R-multiple to `logs/shadow_trades.jsonl`.
+R-multiple to `logs/shadow_trades.jsonl`. It's also force-closed ("flattened")
+at the same no-overnight-risk cutoff real positions get for that symbol's
+market, so it never carries a position across a session close the way a real
+trade never would.
 
 **This never places a real order.** It's a way to evaluate whether the news
 signal would have been profitable before ever considering wiring it to real

@@ -46,6 +46,7 @@ class NewsMonitor:
         settings: Settings,
         bars: BarStream,
         is_market_open: Callable[[str], bool] | None = None,
+        should_flatten_shadow_trade: Callable[[str, str], bool] | None = None,
     ):
         self.settings = settings
         self.bars = bars
@@ -58,6 +59,17 @@ class NewsMonitor:
         # care (tests, one-off tools) -- only the live engine passes a real
         # per-symbol session check.
         self._is_market_open = is_market_open or (lambda symbol: True)
+        # Whether an open shadow trade for `symbol` (given its opened_at)
+        # should be force-closed now -- mirrors real positions getting
+        # flattened before their market's close, so shadow trades carry the
+        # same no-overnight-risk discipline instead of just sitting open
+        # until they happen to hit stop/target/timeout (confirmed live:
+        # trades carrying over, still open, from the previous day). Defaults
+        # to "never" for callers that don't care; only the live engine
+        # passes a real per-symbol/session check.
+        self._should_flatten_shadow_trade = should_flatten_shadow_trade or (
+            lambda symbol, opened_at: False
+        )
         self.finnhub = FinnhubNewsClient(settings.finnhub_api_key)
         self.analyzer = NewsSentimentAnalyzer(settings.anthropic_api_key, settings.news_model)
         self.shadow = ShadowTradeTracker(
@@ -133,20 +145,37 @@ class NewsMonitor:
         await self._poll_news()
 
     def _update_open_shadow_trades(self) -> None:
-        """Skips a symbol entirely while its market is closed, not just the
-        stop/target check -- shadow.update()'s max-hold timeout is wall-clock
-        based, so calling it with the market's last (frozen, hours-stale)
-        close price would fabricate a TIMEOUT close at some arbitrary point
-        overnight using a price nothing actually traded at. Skipping the call
-        outright defers that check to the market's next real, fresh price
-        instead of manufacturing an exit against a stale one."""
+        """Checked in this order for each symbol with an open shadow trade:
+
+        1. Should it be flattened now (today's close window reached, or it
+           carried over from an earlier calendar day than this check
+           existed)? If so, force-close it at the current price -- the same
+           no-overnight-risk discipline real positions get, rather than
+           riding indefinitely until it happens to hit stop/target/timeout.
+        2. Otherwise, is the market closed? Skip entirely, not just the
+           stop/target check -- shadow.update()'s max-hold timeout is
+           wall-clock based, so calling it with the market's last (frozen,
+           hours-stale) close price would fabricate a TIMEOUT close at some
+           arbitrary point overnight using a price nothing actually traded
+           at. Skipping defers that check to the market's next real, fresh
+           price instead of manufacturing an exit against a stale one.
+        3. Otherwise, a normal stop/target/timeout update."""
         for symbol in self.settings.symbol_list:
-            if not self._is_market_open(symbol):
+            trade = self.shadow.open_trades.get(symbol)
+            if trade is None:
                 continue
             df = self.bars.dataframe(symbol)
             if df is None or df.empty:
                 continue
             price = float(df["close"].iloc[-1])
+
+            if self._should_flatten_shadow_trade(symbol, trade.opened_at):
+                self.shadow.flatten(symbol, price)
+                continue
+
+            if not self._is_market_open(symbol):
+                continue
+
             self.shadow.update(symbol, price)
 
     async def _poll_news(self) -> None:

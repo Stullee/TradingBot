@@ -101,6 +101,7 @@ class ShadowTradingStatus:
     wins: int
     losses: int
     timeouts: int
+    flattened: int
     win_rate: float
     avg_r: float
 
@@ -110,6 +111,7 @@ def gather_shadow_trading_status(path: Path) -> ShadowTradingStatus:
     wins = [t for t in trades if t.get("status") == "WIN"]
     losses = [t for t in trades if t.get("status") == "LOSS"]
     timeouts = [t for t in trades if t.get("status") == "TIMEOUT"]
+    flattened = [t for t in trades if t.get("status") == "FLATTENED"]
     r_values = [t["r_multiple"] for t in trades if t.get("r_multiple") is not None]
     avg_r = sum(r_values) / len(r_values) if r_values else 0.0
     win_rate = len(wins) / len(trades) if trades else 0.0
@@ -118,6 +120,7 @@ def gather_shadow_trading_status(path: Path) -> ShadowTradingStatus:
         wins=len(wins),
         losses=len(losses),
         timeouts=len(timeouts),
+        flattened=len(flattened),
         win_rate=win_rate,
         avg_r=avg_r,
     )

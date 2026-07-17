@@ -5,18 +5,21 @@ from tradingbot.status import NewsAnalysisStatus, ShadowTradingStatus
 
 
 def test_print_shadow_trading_empty(capsys):
-    _print_shadow_trading(ShadowTradingStatus(0, 0, 0, 0, 0.0, 0.0), Path("shadow_trades.jsonl"))
+    _print_shadow_trading(ShadowTradingStatus(0, 0, 0, 0, 0, 0.0, 0.0), Path("shadow_trades.jsonl"))
     out = capsys.readouterr().out
     assert "No shadow trades closed yet" in out
 
 
 def test_print_shadow_trading_with_data(capsys):
-    status = ShadowTradingStatus(closed=3, wins=1, losses=1, timeouts=1, win_rate=1 / 3, avg_r=0.4)
+    status = ShadowTradingStatus(
+        closed=4, wins=1, losses=1, timeouts=1, flattened=1, win_rate=1 / 4, avg_r=0.4
+    )
     _print_shadow_trading(status, Path("shadow_trades.jsonl"))
     out = capsys.readouterr().out
-    assert "Closed: 3" in out
+    assert "Closed: 4" in out
     assert "Win: 1" in out
-    assert "Win rate: 33%" in out
+    assert "Flattened: 1" in out
+    assert "Win rate: 25%" in out
     assert "Avg R: +0.40" in out
 
 

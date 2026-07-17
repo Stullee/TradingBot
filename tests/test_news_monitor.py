@@ -252,11 +252,19 @@ class FakeBars:
 
 
 class FakeShadowUpdateTracker:
-    def __init__(self):
+    def __init__(self, open_symbols=None):
         self.update_calls: list[tuple[str, float]] = []
+        self.flatten_calls: list[tuple[str, float]] = []
+        self.open_trades = {
+            symbol: SimpleNamespace(opened_at="2026-07-16T10:00:00+00:00")
+            for symbol in (open_symbols or [])
+        }
 
     def update(self, symbol, price):
         self.update_calls.append((symbol, price))
+
+    def flatten(self, symbol, price):
+        self.flatten_calls.append((symbol, price))
 
 
 def test_open_shadow_trades_are_not_updated_while_market_is_closed(tmp_path):
@@ -269,11 +277,12 @@ def test_open_shadow_trades_are_not_updated_while_market_is_closed(tmp_path):
     monitor = NewsMonitor(
         settings, bars=FakeBars({"ASML": 700.0}), is_market_open=lambda symbol: False
     )
-    monitor.shadow = FakeShadowUpdateTracker()
+    monitor.shadow = FakeShadowUpdateTracker(open_symbols=["ASML"])
 
     monitor._update_open_shadow_trades()
 
     assert monitor.shadow.update_calls == []
+    assert monitor.shadow.flatten_calls == []
 
 
 def test_open_shadow_trades_are_updated_while_market_is_open(tmp_path):
@@ -281,11 +290,31 @@ def test_open_shadow_trades_are_updated_while_market_is_open(tmp_path):
     monitor = NewsMonitor(
         settings, bars=FakeBars({"AAPL": 200.0}), is_market_open=lambda symbol: True
     )
-    monitor.shadow = FakeShadowUpdateTracker()
+    monitor.shadow = FakeShadowUpdateTracker(open_symbols=["AAPL"])
 
     monitor._update_open_shadow_trades()
 
     assert monitor.shadow.update_calls == [("AAPL", 200.0)]
+
+
+def test_open_shadow_trade_is_flattened_instead_of_updated_when_due(tmp_path):
+    """The bug this guards against: shadow trades never got the same
+    no-overnight-risk discipline real positions get via should_flatten() --
+    they just sat open until they happened to hit stop/target/timeout,
+    which is why trades were still open a full day after they opened."""
+    settings = make_settings(tmp_path, symbol_list=["AAPL"])
+    monitor = NewsMonitor(
+        settings,
+        bars=FakeBars({"AAPL": 200.0}),
+        is_market_open=lambda symbol: True,
+        should_flatten_shadow_trade=lambda symbol, opened_at: True,
+    )
+    monitor.shadow = FakeShadowUpdateTracker(open_symbols=["AAPL"])
+
+    monitor._update_open_shadow_trades()
+
+    assert monitor.shadow.flatten_calls == [("AAPL", 200.0)]
+    assert monitor.shadow.update_calls == []
 
 
 def test_poll_completion_is_always_logged_even_with_nothing_new(tmp_path, caplog):

@@ -10,17 +10,23 @@ historical data, and connects with a different client id (live client id +
 50) than the live/paper engine so both can run at the same time without IB
 rejecting one for a duplicate client id.
 
-Fetches run with bounded concurrency (see _FETCH_CONCURRENCY) to cut wall
-time -- but IB enforces a hard historical-data pacing limit (roughly 60
-requests per rolling 10-minute window per connection) that no amount of
-concurrency can get around, so a full run across a large symbol universe
-still has a floor of several minutes. Concurrency mainly helps by
-overlapping each individual request's network latency instead of paying it
-serially, it doesn't bypass IB's own ceiling."""
+Fetches run with bounded concurrency (see _FETCH_CONCURRENCY) to overlap
+each request's own network latency, but concurrency alone doesn't bound
+the *rate* new requests get submitted -- IB enforces a hard historical-data
+pacing limit (roughly 60 requests per rolling 10-minute window per
+connection), and if individual fetches resolve faster than that budget
+allows, concurrency alone blows straight through it (confirmed live: the
+first couple of symbols in a 60+ symbol universe went through fine, then
+every one after started timing out and getting cancelled server-side by
+IB, mid-run). _PACING_GAP_SEC paces new dispatches to stay safely under
+that budget regardless of how fast any given fetch resolves, so a full run
+across a large symbol universe still has a floor of several minutes -- concurrency
+overlaps latency within that floor, it doesn't shrink the floor itself."""
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from tradingbot.backtest.fetch import fetch_history
 from tradingbot.backtest.simulator import Trade, simulate
@@ -35,6 +41,30 @@ from tradingbot.symbols import SymbolSpec
 log = logging.getLogger(__name__)
 
 _FETCH_CONCURRENCY = 5
+# IB's historical-data pacing limit is ~60 requests per rolling 10-minute
+# window -- 11s between dispatches keeps a full run to ~55/10min, with a
+# safety margin rather than cutting it exactly at the ceiling.
+_PACING_GAP_SEC = 11.0
+
+
+class _PacingGate:
+    """Serializes only the moment a new IB historical-data request gets
+    dispatched, spacing successive dispatches at least _PACING_GAP_SEC
+    apart -- what happens after each task passes through (awaiting its own
+    fetch_history call) still overlaps freely with the others."""
+
+    def __init__(self, min_gap_sec: float):
+        self._min_gap = min_gap_sec
+        self._lock = asyncio.Lock()
+        self._last_dispatch = 0.0
+
+    async def wait_turn(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            remaining = self._last_dispatch + self._min_gap - now
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            self._last_dispatch = time.monotonic()
 
 
 async def _process_symbol(
@@ -43,12 +73,14 @@ async def _process_symbol(
     settings: Settings,
     spec: SymbolSpec,
     sem: asyncio.Semaphore,
+    pacing: _PacingGate,
 ) -> tuple[str, list[Trade]]:
     """Qualifies + fetches history for one symbol (bounded by `sem` so only
-    _FETCH_CONCURRENCY IB requests are in flight at once), then simulates.
-    Returns (print-ready summary line, trades) -- errors are caught and
-    turned into a line rather than raised, so one bad symbol doesn't cancel
-    the others' already-in-flight requests."""
+    _FETCH_CONCURRENCY IB requests are in flight at once, paced by `pacing`
+    so new ones aren't dispatched faster than IB's budget allows), then
+    simulates. Returns (print-ready summary line, trades) -- errors are
+    caught and turned into a line rather than raised, so one bad symbol
+    doesn't cancel the others' already-in-flight requests."""
     preset = BUILTIN_MARKETS[spec.market]
     async with sem:
         try:
@@ -59,6 +91,7 @@ async def _process_symbol(
             return f"{spec.symbol:8s} SKIPPED: {exc}", []
 
         is_crypto = spec.security_type == "CRYPTO"
+        await pacing.wait_turn()
         try:
             df = await fetch_history(
                 broker.ib,
@@ -114,8 +147,9 @@ async def run() -> None:
     all_trades: list[Trade] = []
     try:
         sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
+        pacing = _PacingGate(_PACING_GAP_SEC)
         tasks = [
-            asyncio.create_task(_process_symbol(broker, strategy, settings, spec, sem))
+            asyncio.create_task(_process_symbol(broker, strategy, settings, spec, sem, pacing))
             for spec in settings.symbol_specs
         ]
         # as_completed rather than gather: prints progress as each symbol

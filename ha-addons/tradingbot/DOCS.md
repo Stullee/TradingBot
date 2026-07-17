@@ -69,7 +69,11 @@ Shows:
 - **Per-symbol signals** — every watched symbol, its current position (if
   any), the bar strategy's latest LONG/SHORT/FLAT reading and RSI, and the
   latest news-sentiment reading, all in one table — a "what's this stock
-  doing right now" glance instead of digging through logs.
+  doing right now" glance instead of digging through logs. When the active
+  strategy is `trendline_breakout`, extra columns appear automatically:
+  the fitted line's slope, its R-squared (fit quality), and the current
+  price's distance from that line — the exact numbers `generate_signal` is
+  acting on, as a live sanity check on what the strategy currently sees.
 - **Open positions** with live unrealized P&L.
 - **Today's realized P&L** per symbol.
 - **Open shadow trades** — any news-driven shadow trade currently being

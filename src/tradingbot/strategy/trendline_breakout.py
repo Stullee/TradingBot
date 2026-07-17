@@ -105,3 +105,21 @@ class TrendlineBreakout(Strategy):
         if position_is_long:
             return curr_close < line
         return curr_close > line
+
+    def diagnostics(self, df: pd.DataFrame) -> dict:
+        """Not used by generate_signal/is_exit_signal -- a sanity-check
+        window into what the fit currently looks like for this symbol
+        (picked up by the live dashboard's per-symbol table, see engine.py),
+        since slope/fit-quality/distance-from-line aren't otherwise visible
+        anywhere while this strategy is live. Optional, duck-typed: no other
+        Strategy needs to implement this, engine.py only reads it if present."""
+        if len(df) < self.min_bars:
+            return {}
+        slope, line, r2 = self._fit(df["close"])
+        close = float(df["close"].iloc[-1])
+        return {
+            "trend_slope": slope,
+            "trend_r_squared": r2,
+            "trend_line_value": line,
+            "trend_distance_pct": (close - line) / line * 100 if line else None,
+        }

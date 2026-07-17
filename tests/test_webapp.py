@@ -174,6 +174,57 @@ def test_status_endpoint_includes_per_symbol_signals_and_open_shadow_trades(tmp_
     run(scenario())
 
 
+def test_status_endpoint_includes_trend_diagnostics_only_when_the_strategy_provides_them(
+    tmp_path, monkeypatch
+):
+    """trend_slope/trend_r_squared/trend_distance_pct only exist in
+    latest_signals when the active strategy exposes a diagnostics() method
+    (currently trendline_breakout only) -- must come through as None/absent
+    for a symbol with no such fields, not raise a KeyError."""
+
+    async def fake_gather_account_status(broker, include_fills=True):
+        return AccountStatus(equity=100_000.0, base_currency="USD", positions=[])
+
+    monkeypatch.setattr("tradingbot.webapp.gather_account_status", fake_gather_account_status)
+
+    async def scenario():
+        settings = make_settings(tmp_path, symbol_list=["AAPL", "MSFT"])
+        latest_signals = {
+            "AAPL": {
+                "signal": "LONG",
+                "rsi": 40.0,
+                "close": 200.0,
+                "vwap": 199.0,
+                "updated_at": "t",
+                "trend_slope": 0.5,
+                "trend_r_squared": 0.9,
+                "trend_line_value": 199.5,
+                "trend_distance_pct": 1.2,
+            },
+            "MSFT": {"signal": "FLAT", "rsi": 50.0, "close": 300.0, "vwap": 300.0, "updated_at": "t"},
+        }
+        app = create_app(StubBroker(), settings, latest_signals)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.get("/api/status")
+            data = await resp.json()
+
+            aapl = next(s for s in data["symbols"] if s["symbol"] == "AAPL")
+            assert aapl["trend_slope"] == 0.5
+            assert aapl["trend_r_squared"] == 0.9
+            assert aapl["trend_distance_pct"] == 1.2
+
+            msft = next(s for s in data["symbols"] if s["symbol"] == "MSFT")
+            assert msft["trend_slope"] is None
+            assert msft["trend_r_squared"] is None
+            assert msft["trend_distance_pct"] is None
+        finally:
+            await client.close()
+
+    run(scenario())
+
+
 def test_status_endpoint_returns_500_json_on_failure(tmp_path, monkeypatch):
     async def failing_gather_account_status(broker, include_fills=True):
         raise RuntimeError("IB not connected")

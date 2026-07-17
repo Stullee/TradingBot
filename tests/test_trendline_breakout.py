@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from tradingbot.strategy.base import Signal
 from tradingbot.strategy.trendline_breakout import TrendlineBreakout
@@ -72,3 +73,23 @@ def test_is_exit_signal_for_short_once_price_rises_back_above_its_trendline():
 
     risen_above = df_from([200.0, 199.0, 102.0, 101.5, 101.0, 100.5, 100.0, 103.0])
     assert strat.is_exit_signal(risen_above, position_is_long=False)
+
+
+def test_diagnostics_reports_the_current_fit():
+    """This is what the live dashboard shows per symbol as a sanity check
+    on what the strategy currently sees -- must match the same fit
+    generate_signal itself acts on, not some separately-computed value."""
+    strat = make_strategy()
+    diagnostics = strat.diagnostics(df_from(_TIGHT_RISE_THEN_BREAKOUT))
+
+    assert diagnostics["trend_slope"] == pytest.approx(1.0)
+    assert diagnostics["trend_r_squared"] == pytest.approx(0.8, abs=1e-6)
+    assert diagnostics["trend_line_value"] == pytest.approx(104.0)
+    # (105 - 104) / 104 * 100
+    assert diagnostics["trend_distance_pct"] == pytest.approx(0.9615, abs=1e-3)
+
+
+def test_diagnostics_empty_without_enough_bars():
+    strat = make_strategy()
+    df = df_from(_TIGHT_RISE_THEN_BREAKOUT)
+    assert strat.diagnostics(df.iloc[: strat.min_bars - 1]) == {}

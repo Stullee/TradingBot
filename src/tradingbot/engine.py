@@ -526,6 +526,13 @@ class TradingEngine:
             "vwap": float(last["vwap"]),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        # Optional, duck-typed: strategies whose entry logic isn't well
+        # summarized by rsi/vwap alone (e.g. trendline_breakout's
+        # slope/fit-quality) can expose their own extra fields here, picked
+        # up by the dashboard's per-symbol table as a live sanity check.
+        diagnostics_fn = getattr(self.strategy, "diagnostics", None)
+        if diagnostics_fn is not None:
+            self.latest_signals[symbol].update(diagnostics_fn(enriched))
         if signal == Signal.FLAT:
             return
 

@@ -84,17 +84,33 @@ function badge(dir) {
 
 function renderSymbols(symbols) {
   if (!symbols.length) return '<div class="empty">No symbols configured.</div>';
+  var hasTrend = symbols.some(function(s) {
+    return s.trend_r_squared !== null && s.trend_r_squared !== undefined;
+  });
   var rows = symbols.map(function(s) {
     var posText = s.position_qty ? fmt(s.position_qty, 0) +
       (s.unrealized_pnl !== null ? " (" + fmt(s.unrealized_pnl) + ")" : "") : "-";
-    return "<tr><td>" + s.symbol + "</td><td>" + posText + "</td><td>" + badge(s.bar_signal) +
-      "</td><td>" + (s.rsi !== null && s.rsi !== undefined ? fmt(s.rsi, 0) : "-") + "</td><td>" +
-      badge(s.news_direction) + "</td><td>" +
+    var row = "<tr><td>" + s.symbol + "</td><td>" + posText + "</td><td>" + badge(s.bar_signal) +
+      "</td><td>" + (s.rsi !== null && s.rsi !== undefined ? fmt(s.rsi, 0) : "-") + "</td>";
+    if (hasTrend) {
+      var hasFit = s.trend_r_squared !== null && s.trend_r_squared !== undefined;
+      row += "<td>" + (hasFit ? fmt(s.trend_slope, 4) : "-") + "</td><td>" +
+        (hasFit ? fmt(s.trend_r_squared, 2) : "-") + "</td><td class=\\"" +
+        (hasFit ? cls(s.trend_distance_pct) : "") + "\\">" +
+        (hasFit ? (s.trend_distance_pct >= 0 ? "+" : "") + fmt(s.trend_distance_pct, 2) + "%" : "-") +
+        "</td>";
+    }
+    row += "<td>" + badge(s.news_direction) + "</td><td>" +
       (s.news_confidence !== null && s.news_confidence !== undefined ? fmt(s.news_confidence, 2) : "-") +
       "</td></tr>";
+    return row;
   }).join("");
-  return "<table><tr><th>Symbol</th><th>Position (unreal. P&amp;L)</th><th>Bar Signal</th>" +
-    "<th>RSI</th><th>News</th><th>Confidence</th></tr>" + rows + "</table>";
+  var head = "<tr><th>Symbol</th><th>Position (unreal. P&amp;L)</th><th>Bar Signal</th><th>RSI</th>";
+  if (hasTrend) {
+    head += "<th>Slope</th><th>Trend R&sup2;</th><th>Dist. from Line</th>";
+  }
+  head += "<th>News</th><th>Confidence</th></tr>";
+  return "<table>" + head + rows + "</table>";
 }
 
 function renderPositions(positions) {
@@ -264,6 +280,13 @@ async def _status_payload(
                 "bar_signal": sig["signal"] if sig else None,
                 "bar_signal_updated_at": sig["updated_at"] if sig else None,
                 "rsi": sig["rsi"] if sig else None,
+                # Only populated when the active strategy exposes a
+                # diagnostics() method (currently trendline_breakout) --
+                # None/absent for the others, rendered as "-" on the
+                # dashboard the same way a missing bar signal already is.
+                "trend_slope": sig.get("trend_slope") if sig else None,
+                "trend_r_squared": sig.get("trend_r_squared") if sig else None,
+                "trend_distance_pct": sig.get("trend_distance_pct") if sig else None,
                 "news_direction": n["direction"] if n else None,
                 "news_confidence": n["confidence"] if n else None,
                 "news_updated_at": n["assessed_at"] if n else None,

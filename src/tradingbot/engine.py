@@ -26,6 +26,7 @@ from tradingbot.news.monitor import NewsMonitor
 from tradingbot.risk.manager import RiskManager
 from tradingbot.strategy.base import Signal, Strategy
 from tradingbot.strategy.ema_rsi_momentum import EmaRsiVwapMomentum
+from tradingbot.strategy.trendline_breakout import TrendlineBreakout
 from tradingbot.strategy.vwap_mean_reversion import VwapMeanReversion
 from tradingbot.symbols import SymbolSpec
 from tradingbot.webapp import run_dashboard
@@ -73,6 +74,13 @@ def build_strategy(settings: Settings) -> Strategy:
             rsi_long_max=settings.rsi_long_max,
             rsi_short_min=settings.rsi_short_min,
             rsi_short_max=settings.rsi_short_max,
+            atr_period=settings.atr_period,
+            allow_shorting=settings.allow_shorting,
+        )
+    if settings.strategy == "trendline_breakout":
+        return TrendlineBreakout(
+            trend_window=settings.trend_window,
+            min_r_squared=settings.min_r_squared,
             atr_period=settings.atr_period,
             allow_shorting=settings.allow_shorting,
         )

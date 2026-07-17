@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     #   often -- many small trades a day, suited to range-bound conditions.
     # "ema_rsi_momentum": trend-following EMA crossover, fires rarely (only
     #   at genuine trend turns) -- see strategy/*.py docstrings for details.
+    # "trendline_breakout": chases a confirmed rise/fall (regression-fit
+    #   trendline break) instead of fading it -- unvalidated live, shadow-test
+    #   before trusting it with capital.
     strategy: str = "vwap_mean_reversion"
     bar_size: str = "5 mins"
     ema_fast: int = 9
@@ -51,6 +54,12 @@ class Settings(BaseSettings):
     # prevailing trend, not against it. Set to 0 to disable (old
     # unconditional countertrend behavior).
     trend_ema_period: int = 50
+    # trendline_breakout only: rolling window (in bars) the regression
+    # trendline is fit over, and the minimum R-squared of that fit required
+    # to treat it as a genuine trend (vs. a noisy zigzag that nets upward
+    # over the window by chance).
+    trend_window: int = 20
+    min_r_squared: float = 0.7
     atr_period: int = 14
     stop_atr_mult: float = 1.5
     target_atr_mult: float = 2.5
@@ -93,7 +102,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _guard_strategy_name(self) -> "Settings":
-        valid = {"vwap_mean_reversion", "ema_rsi_momentum"}
+        valid = {"vwap_mean_reversion", "ema_rsi_momentum", "trendline_breakout"}
         if self.strategy not in valid:
             raise ValueError(f"STRATEGY must be one of {sorted(valid)}, got {self.strategy!r}")
         return self

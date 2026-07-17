@@ -4,10 +4,11 @@ version: "0.7.13"
 slug: tradingbot
 description: >-
   Automated day-trading bot for Interactive Brokers across US/EU/Asia stocks
-  and crypto. Pluggable strategy (VWAP mean-reversion by default, or EMA/RSI
-  trend momentum), ATR-based bracket orders, FX-aware position sizing, daily
-  loss kill switch, per-market auto-flatten. Requires a separately running
-  IB Gateway (see DOCS.md) - this add-on only contains the trading logic.
+  and crypto. Pluggable strategy (VWAP mean-reversion by default, EMA/RSI
+  trend momentum, or trendline breakout), ATR-based bracket orders, FX-aware
+  position sizing, daily loss kill switch, per-market auto-flatten. Requires
+  a separately running IB Gateway (see DOCS.md) - this add-on only contains
+  the trading logic.
 url: https://github.com/Stullee/TradingBot
 arch:
   - amd64
@@ -39,6 +40,8 @@ options:
   rsi_overbought: 70
   vwap_dist_atr_mult: 0.5
   trend_ema_period: 50
+  trend_window: 20
+  min_r_squared: 0.7
   atr_period: 14
   stop_atr_mult: 1.5
   target_atr_mult: 2.5
@@ -66,7 +69,7 @@ schema:
   allow_live_trading: bool
   symbols: str
   markets: str
-  strategy: list(vwap_mean_reversion|ema_rsi_momentum)
+  strategy: list(vwap_mean_reversion|ema_rsi_momentum|trendline_breakout)
   bar_size: str
   ema_fast: int(2,200)
   ema_slow: int(2,200)
@@ -79,6 +82,8 @@ schema:
   rsi_overbought: float(0,100)
   vwap_dist_atr_mult: float(0.05,10)
   trend_ema_period: int(0,500)
+  trend_window: int(5,200)
+  min_r_squared: float(0,1)
   atr_period: int(2,100)
   stop_atr_mult: float(0.1,20)
   target_atr_mult: float(0.1,20)

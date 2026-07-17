@@ -32,14 +32,16 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `allow_live_trading` | Must be `true` to connect to a live-trading port |
 | `symbols` | Simple case: comma-separated US tickers, e.g. `AAPL,MSFT,NVDA` |
 | `markets` | Multi-market DSL, takes priority over `symbols` when set — see below |
-| `strategy` | `vwap_mean_reversion` (default) or `ema_rsi_momentum` — see below |
+| `strategy` | `vwap_mean_reversion` (default), `ema_rsi_momentum`, or `trendline_breakout` — see below |
 | `bar_size` | IB bar size string, e.g. `5 mins` |
 | `ema_fast` / `ema_slow` | EMA crossover periods (used by `ema_rsi_momentum` only) |
-| `rsi_period` | RSI lookback period (used by both strategies) |
+| `rsi_period` | RSI lookback period (used by `vwap_mean_reversion`/`ema_rsi_momentum`) |
 | `rsi_long_min/max`, `rsi_short_min/max` | RSI entry filter bands (used by `ema_rsi_momentum` only) |
 | `rsi_oversold` / `rsi_overbought` | RSI extremes required for an entry (used by `vwap_mean_reversion` only) |
 | `vwap_dist_atr_mult` | How far price must have drifted from VWAP, in ATR multiples, to trigger a mean-reversion entry (used by `vwap_mean_reversion` only) |
 | `trend_ema_period` | Trend filter EMA period (used by `vwap_mean_reversion` only) — blocks LONG entries in a downtrend and SHORT entries in an uptrend, so dip-buys/rip-sells only fire with the prevailing trend, not against it. Set to `0` to disable and get the old unconditional countertrend behavior |
+| `trend_window` | Rolling regression window in bars (used by `trendline_breakout` only) |
+| `min_r_squared` | Minimum goodness-of-fit (0-1) required to treat the regression as a real trend, not noise (used by `trendline_breakout` only) |
 | `atr_period`, `stop_atr_mult`, `target_atr_mult` | ATR-based stop-loss/take-profit distances |
 | `allow_shorting` | Enable short entries (disabled by default) |
 | `risk_per_trade_pct` | % of account equity risked per trade (stop-distance based) |
@@ -87,9 +89,9 @@ port, that's a standalone/`.env` (`DASHBOARD_PORT`) thing, not something to
 change via the add-on's options. Turn it off entirely with
 `enable_dashboard: false` if you'd rather not run a web server at all.
 
-## Strategy: VWAP mean-reversion vs EMA/RSI momentum
+## Strategy: VWAP mean-reversion vs EMA/RSI momentum vs trendline breakout
 
-Two pluggable strategies are built in, selected via the `strategy` option:
+Three pluggable strategies are built in, selected via the `strategy` option:
 
 - **`vwap_mean_reversion`** (default): enters when price has drifted
   meaningfully below/above the session VWAP (scaled by ATR) *and* RSI
@@ -104,11 +106,21 @@ Two pluggable strategies are built in, selected via the `strategy` option:
   by an RSI band and VWAP side. Only fires at genuine trend turns — a handful
   of times a session at most — but tends to catch bigger moves when a real
   trend develops. Exits on the opposite EMA cross.
+- **`trendline_breakout`**: fits a least-squares regression line over the
+  last `trend_window` bars and enters when price breaks above (or, if
+  shorting, below) that line, requiring the fit to be tight
+  (`min_r_squared`) so it's chasing a real, established rise rather than a
+  noisy zigzag that happens to net upward. Chases momentum instead of
+  fading it, unlike the other two — more aggressive and, unlike the other
+  two, **unvalidated live**. Backtest it first (see Backtesting below)
+  before trusting it with capital. Exits when price falls back through
+  its own trendline.
 
 If you're not seeing enough trades with the momentum strategy, or want a
 higher-frequency, higher-win-rate/smaller-per-trade approach, use the
 default `vwap_mean_reversion`. Switch to `ema_rsi_momentum` if you'd rather
-trade fewer, larger trend moves.
+trade fewer, larger trend moves, or `trendline_breakout` if you want to
+chase a confirmed rise instead of waiting for either of those setups.
 
 ## Multi-market trading (US / EU / Asia / crypto)
 

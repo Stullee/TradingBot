@@ -74,6 +74,17 @@ def test_latest_report_reloads_from_disk(tmp_path):
     assert reborn.latest_report["health"] == "WARNING"
 
 
+def test_missing_health_defaults_to_warning(tmp_path):
+    """Confirmed live: a truncated tool call came back without the required
+    'health' field ('health=None' in the log, blank badge on the dashboard).
+    An incomplete report must degrade to WARNING, never to nothing."""
+    incomplete = {k: v for k, v in REPORT.items() if k != "health"}
+    advisor = make_advisor(tmp_path, incomplete)
+    report = run(advisor.maybe_run({}))
+    assert report["health"] == "WARNING"
+    assert advisor.latest_report["health"] == "WARNING"
+
+
 def test_failed_call_returns_none_and_rearms(tmp_path):
     advisor = TradingAdvisor(api_key="test", model="test-model", interval_min=60, log_dir=tmp_path)
 

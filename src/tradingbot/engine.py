@@ -743,6 +743,11 @@ class TradingEngine:
             self.latest_signals[symbol].update(diagnostics_fn(enriched))
         if signal == Signal.FLAT:
             return
+        if signal == Signal.SHORT and spec.security_type == "CRYPTO":
+            # IB has no spot-crypto shorting -- the order would only come
+            # back rejected (confirmed live: XRP SHORT signal on a Sunday).
+            log.info("%s: SHORT signal skipped -- IB does not support shorting spot crypto.", symbol)
+            return
 
         entry_price = float(last["close"])
         atr_value = float(last["atr"])
@@ -758,11 +763,29 @@ class TradingEngine:
             target_price = entry_price - target_dist
             action = "SELL"
 
-        equity_local = (
-            await self.fx.convert(equity, self.base_currency, spec.currency)
-            if spec.currency != self.base_currency
-            else equity
-        )
+        try:
+            equity_local = (
+                await self.fx.convert(equity, self.base_currency, spec.currency)
+                if spec.currency != self.base_currency
+                else equity
+            )
+        except Exception as exc:  # noqa: BLE001 - sizing without a rate is impossible
+            # Revert the new-bar latch so the next tick re-evaluates this
+            # same bar once the FX subscription has warmed up (or the FX
+            # market has reopened) -- without this, the one failed attempt
+            # silently discarded the signal (confirmed live: the first real
+            # entry signal of a session, XRP on a EUR-base account, lost to
+            # a quoteless weekend EURUSD ticker).
+            log.warning(
+                "%s: no FX rate for %s->%s yet (%s) -- deferring this bar's signal "
+                "to the next tick instead of dropping it.",
+                symbol,
+                self.base_currency,
+                spec.currency,
+                exc,
+            )
+            self._last_bar_start[symbol] = last_seen
+            return
         meta = self.contract_meta.get(symbol, ContractMeta())
         if spec.security_type == "CRYPTO":
             # Fractional sizing -- whole-unit sizing made crypto untradeable

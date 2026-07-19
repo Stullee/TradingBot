@@ -15,23 +15,34 @@ class FakeContract:
 class FakeTicker:
     """midpoint() returns None for the first `populate_after` calls, then
     `mid` -- simulates a freshly subscribed ticker that takes a moment for
-    its first tick to arrive."""
+    its first tick to arrive. `close` (default NaN) simulates the prior
+    closing price IB still reports when the market itself is closed."""
 
-    def __init__(self, mid: float | None, populate_after: int = 0):
+    def __init__(self, mid: float | None, populate_after: int = 0, close: float = float("nan")):
         self._mid = mid
         self._populate_after = populate_after
         self._calls = 0
         self.contract = None
+        self.close = close
 
     def midpoint(self) -> float | None:
         self._calls += 1
         return self._mid if self._calls > self._populate_after else None
 
+    def marketPrice(self) -> float:
+        return float("nan")
+
 
 class FakeIB:
-    def __init__(self, rates: dict[str, float], populate_after: dict[str, int] | None = None):
+    def __init__(
+        self,
+        rates: dict[str, float],
+        populate_after: dict[str, int] | None = None,
+        closes: dict[str, float] | None = None,
+    ):
         self.rates = rates  # e.g. {"EURUSD": 1.10}
         self.populate_after = populate_after or {}
+        self.closes = closes or {}
         self.qualify_calls: list[str] = []
         self.mkt_data_calls: list[str] = []
         self.cancel_calls: list[str] = []
@@ -47,7 +58,11 @@ class FakeIB:
     def reqMktData(self, contract, *args, **kwargs):
         pair = contract.symbol + contract.currency
         self.mkt_data_calls.append(pair)
-        ticker = FakeTicker(self.rates.get(pair), self.populate_after.get(pair, 0))
+        ticker = FakeTicker(
+            self.rates.get(pair),
+            self.populate_after.get(pair, 0),
+            close=self.closes.get(pair, float("nan")),
+        )
         ticker.contract = contract
         return ticker
 
@@ -99,6 +114,18 @@ def test_subscription_is_reused_not_requested_again():
     run(fx.rate("EUR", "USD"))
     run(fx.rate("EUR", "USD"))
     assert ib.mkt_data_calls == ["EURUSD"]  # second call reused the live subscription
+
+
+def test_falls_back_to_prior_close_when_no_live_quote():
+    """Confirmed live: on a Sunday (forex market closed) a freshly
+    subscribed EURUSD ticker never produced a midpoint, and the session's
+    first entry signal was lost to 'Could not determine FX rate'. With no
+    bid/ask, the prior close must be used -- plenty accurate for sizing."""
+    ib = FakeIB({"EURUSD": None}, closes={"EURUSD": 1.08})
+    fx = fast_fx(ib)
+    assert run(fx.rate("EUR", "USD")) == 1.08
+    # inverse direction works off the same closed-market ticker too
+    assert run(fx.rate("USD", "EUR")) == pytest.approx(1 / 1.08)
 
 
 def test_missing_rate_raises():

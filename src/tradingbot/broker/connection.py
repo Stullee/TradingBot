@@ -88,6 +88,13 @@ class BrokerConnection:
         but a human should hear about."""
         if errorCode not in CRITICAL_ORDER_ERROR_CODES:
             return
+        # The same codes fire for non-order requests too: error 200 ("no
+        # security definition") is also the normal response to probing a
+        # nonexistent FX pair during qualification (confirmed live: the
+        # FxConverter's USDEUR probe was reported as an "order error").
+        # Only escalate when reqId is actually one of our submitted orders.
+        if not any(t.order.orderId == reqId for t in self.ib.trades()):
+            return
         symbol = getattr(contract, "symbol", None) or "?"
         log.error("IB order error %s for %s (orderId/reqId=%s): %s", errorCode, symbol, reqId, errorString)
         if self.on_critical_order_error is not None:

@@ -153,7 +153,10 @@ class TradingAdvisor:
         )
         response = await self._client.messages.create(
             model=self._model,
-            max_tokens=1500,
+            # Generous ceiling: a truncated tool call comes back with fields
+            # missing entirely (confirmed live: a report with no "health"
+            # despite the schema requiring it, at a 1500 limit).
+            max_tokens=3000,
             system=_SYSTEM_PROMPT,
             tools=[_TOOL],
             tool_choice={"type": "tool", "name": "report_trading_assessment"},
@@ -162,6 +165,14 @@ class TradingAdvisor:
         for block in response.content:
             if block.type == "tool_use":
                 report = dict(block.input)
+                if report.get("health") not in ("OK", "WARNING", "CRITICAL"):
+                    log.warning(
+                        "Advisor report missing/invalid health field (got %r, keys=%s) "
+                        "-- treating as WARNING.",
+                        report.get("health"),
+                        sorted(report),
+                    )
+                    report["health"] = "WARNING"
                 report["generated_at"] = datetime.now(timezone.utc).isoformat()
                 report["model"] = self._model
                 self.latest_report = report

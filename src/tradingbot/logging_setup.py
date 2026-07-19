@@ -36,3 +36,12 @@ def setup_logging(level: str = "INFO", log_dir: str = "logs") -> None:
     )
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
+
+    # Third-party request logging is both noisy and leaky at INFO: httpx
+    # logs every request's full URL -- for Finnhub that includes the API
+    # token as a query parameter (confirmed live: the real key visible in a
+    # shipped log) -- and the dashboard adds an access-log line every 5s.
+    # In one live sample these made up ~80% of all log volume. WARNING
+    # keeps their actual errors visible.
+    for noisy_logger in ("httpx", "httpcore", "aiohttp.access"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)

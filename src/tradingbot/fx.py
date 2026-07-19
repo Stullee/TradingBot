@@ -51,6 +51,19 @@ class FxConverter:
     async def convert(self, amount: float, from_ccy: str, to_ccy: str) -> float:
         return amount * await self.rate(from_ccy, to_ccy)
 
+    @staticmethod
+    def _best_price(ticker: Ticker) -> float | None:
+        """Midpoint when a live bid/ask exists; otherwise the most recent
+        traded/closing price. The fallback matters when the FX market itself
+        is closed (weekends): confirmed live, a Sunday crypto signal on a
+        EUR-base account found a freshly subscribed EURUSD ticker with no
+        bid/ask to build a midpoint from, and the trade was lost -- the
+        prior close is plenty accurate for position sizing."""
+        for value in (ticker.midpoint(), ticker.marketPrice(), ticker.close):
+            if value and value == value:  # excludes None/0/NaN
+                return value
+        return None
+
     async def _price(self, pair: str) -> float | None:
         ticker = self._tickers.get(pair)
         if ticker is None:
@@ -78,16 +91,16 @@ class FxConverter:
             self._tickers[pair] = ticker
             log.info("Subscribed to live/delayed FX quotes for %s", pair)
 
-        price = ticker.midpoint()
-        if price and price == price:
+        price = self._best_price(ticker)
+        if price is not None:
             return price
 
         # Freshly subscribed (or IB hasn't sent a tick yet) -- give it a
         # moment; every later call for this pair reuses the now-warm ticker.
         for _ in range(self.first_tick_attempts):
             await asyncio.sleep(self.first_tick_delay_sec)
-            price = ticker.midpoint()
-            if price and price == price:
+            price = self._best_price(ticker)
+            if price is not None:
                 return price
         return None
 

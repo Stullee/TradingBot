@@ -140,3 +140,26 @@ def test_enable_persistence_ignores_corrupt_file(tmp_path):
     broker = make_broker()
     broker.enable_realized_pnl_persistence(path)  # should not raise
     assert broker.realized_pnl_by_symbol == {}
+
+
+def test_critical_error_hook_fires_only_for_our_own_orders():
+    """Confirmed live: error 200 from the FxConverter's USDEUR
+    qualification probe (a nonexistent pair, probed by design) was reported
+    as 'IB order error 200' -- the critical-code set overlaps codes IB also
+    uses for non-order requests, so only a reqId matching one of our
+    submitted orders' ids may escalate."""
+    from types import SimpleNamespace
+
+    from tradingbot.broker.connection import BrokerConnection
+    from tradingbot.config import Settings
+
+    broker = BrokerConnection(Settings(ib_port=7497, symbols="AAPL"))
+    calls: list[tuple[int, int]] = []
+    broker.on_critical_order_error = lambda req_id, code, msg: calls.append((req_id, code))
+    broker.ib.trades = lambda: [SimpleNamespace(order=SimpleNamespace(orderId=221))]
+
+    broker._on_ib_error(999, 200, "no security definition", None)  # FX probe -> ignored
+    broker._on_ib_error(221, 200, "no security definition", None)  # our order -> fires
+    broker._on_ib_error(221, 2104, "farm connection ok", None)  # benign code -> ignored
+
+    assert calls == [(221, 200)]

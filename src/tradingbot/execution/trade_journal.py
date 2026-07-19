@@ -311,6 +311,7 @@ class TradeJournal:
             "net_pnl": round(net, 4),
             "r_multiple": r_multiple,
             "strategy": context.strategy if context else None,
+            "intended_entry": context.entry_ref_price if context else None,
             "intended_stop": context.stop_price if context else None,
             "intended_target": context.target_price if context else None,
             "seeded_entry": cycle.seeded,

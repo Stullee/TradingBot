@@ -238,6 +238,22 @@ from the persisted files above — news
 shadow-trading win rate/expectancy and news-analysis activity. Read-only,
 places no orders.
 
+## End-of-day summary
+
+At every UTC day rollover (after the 23:55 UTC crypto flatten checkpoint,
+so the day is complete) the engine writes a structured summary of the
+finished day to `/data/logs/eod_reports.jsonl`, logs a readable version,
+and — if `alert_webhook_url` is set — pushes a one-paragraph digest to
+your phone: trades closed with win/loss and average R, net P&L per
+currency (commissions included), measured entry slippage, equity change vs
+the day/week baselines, kill-switch state, and shadow/news activity. The
+CLI report also prints the latest one, or re-print any day on demand:
+
+```bash
+docker exec -it <container> python /app/addon_eod_entrypoint.py            # today
+docker exec -it <container> python /app/addon_eod_entrypoint.py 2026-07-20 # a specific day
+```
+
 ## Backtesting
 
 Before trusting a strategy, it's worth checking whether it has any

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from tradingbot.broker.connection import BrokerConnection
 from tradingbot.config import load_settings
+from tradingbot.eod import format_eod_text, load_latest_eod
 from tradingbot.status import (
     AccountStatus,
     NewsAnalysisStatus,
@@ -153,6 +154,15 @@ async def run() -> None:
     _print_shadow_trading(gather_shadow_trading_status(shadow_path), shadow_path)
     _print_news_analysis(gather_news_analysis_status(news_path), news_path)
     _print_advisor(log_dir / "advisor_reports.jsonl")
+
+    latest_eod = load_latest_eod(log_dir)
+    if latest_eod is not None:
+        print(format_eod_text(latest_eod))
+    else:
+        print(
+            "No end-of-day summary generated yet (the engine emits one at each "
+            "UTC day rollover; `python -m tradingbot.eod` builds one on demand)."
+        )
 
 
 def main() -> None:

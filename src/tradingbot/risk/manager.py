@@ -166,6 +166,14 @@ class RiskManager:
         return self._kill_switch_active or self._weekly_kill_active
 
     @property
+    def day_start_equity(self) -> float | None:
+        return self._starting_equity
+
+    @property
+    def week_start_equity(self) -> float | None:
+        return self._week_start_equity
+
+    @property
     def daily_kill_switch_active(self) -> bool:
         return self._kill_switch_active
 

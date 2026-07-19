@@ -1,4 +1,5 @@
 import asyncio
+import tempfile
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -27,8 +28,11 @@ def make_engine() -> TradingEngine:
     # max_weekly_loss_pct=0 so these tests exercise the *daily* baseline
     # semantics in isolation (the weekly breaker has its own tests in
     # test_risk_manager.py -- with the default 5% it would trip on the
-    # equity drops simulated here).
-    settings = Settings(ib_port=7497, symbols="AAPL", max_weekly_loss_pct=0)
+    # equity drops simulated here). log_dir is a temp dir because the day
+    # rollover these tests trigger now also emits an EOD summary file.
+    settings = Settings(
+        ib_port=7497, symbols="AAPL", max_weekly_loss_pct=0, log_dir=tempfile.mkdtemp()
+    )
     engine = TradingEngine(settings)
     engine.bars = FakeBars()
     engine.orders = SimpleNamespace(

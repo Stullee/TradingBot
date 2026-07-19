@@ -21,6 +21,7 @@ from tradingbot.broker.connection import BrokerConnection, ContractMeta
 from tradingbot.config import Settings
 from tradingbot.data.bars import BarStream, parse_bar_size_seconds
 from tradingbot.data.indicators import add_indicators, atr
+from tradingbot.eod import append_eod_record, build_eod_summary, format_eod_alert, format_eod_text
 from tradingbot.execution.order_manager import OrderManager
 from tradingbot.execution.trade_journal import TradeJournal, summarize_live_trades
 from tradingbot.fx import FxConverter
@@ -403,9 +404,26 @@ class TradingEngine:
         # once, unlike any single market's own local session close.
         today = datetime.now(timezone.utc).date()
         if today != self._trading_day:
+            # Capture the finished day's baselines/switch state BEFORE the
+            # session reset wipes them -- the EOD summary describes the day
+            # that just ended, not the fresh one.
+            finished_day = self._trading_day
+            finished_day_start = self.risk.day_start_equity
+            finished_week_start = self.risk.week_start_equity
+            finished_daily_kill = self.risk.daily_kill_switch_active
+            finished_weekly_kill = self.risk.weekly_kill_switch_active
             self._trading_day = today
             self.risk.start_new_session(equity, today)
             log.info("New UTC trading day (%s): risk manager session reset, equity=%.2f", today, equity)
+            if finished_day is not None:
+                self._emit_eod_summary(
+                    finished_day,
+                    equity,
+                    finished_day_start,
+                    finished_week_start,
+                    finished_daily_kill,
+                    finished_weekly_kill,
+                )
 
         if self.risk.check_loss_limits(equity):
             # Flatten once per trip, not every 10s for the rest of the day.
@@ -609,6 +627,47 @@ class TradingEngine:
             return None
         distance = atr_value * self.settings.stop_atr_mult
         return last_close - distance if position_qty > 0 else last_close + distance
+
+    def _emit_eod_summary(
+        self,
+        day,
+        equity: float,
+        day_start_equity: float | None,
+        week_start_equity: float | None,
+        daily_kill: bool,
+        weekly_kill: bool,
+    ) -> None:
+        """Fires once at the UTC day rollover (the 23:55 UTC crypto flatten
+        checkpoint has already passed, so the finished day is complete):
+        appends a structured record to logs/eod_reports.jsonl, logs the
+        readable version, and pushes a one-paragraph digest to the alert
+        webhook. Failures are swallowed -- a reporting problem must never
+        break the trading tick."""
+        try:
+            summary = build_eod_summary(
+                Path(self.settings.log_dir),
+                day,
+                equity=equity,
+                base_currency=self.base_currency,
+                day_start_equity=day_start_equity,
+                week_start_equity=week_start_equity,
+                daily_kill_switch=daily_kill,
+                weekly_kill_switch=weekly_kill,
+                advisor_assessment=(
+                    self.advisor.latest_report.get("assessment")
+                    if self.advisor is not None and self.advisor.latest_report
+                    else None
+                ),
+            )
+            append_eod_record(Path(self.settings.log_dir), summary)
+            log.info("End-of-day summary:\n%s", format_eod_text(summary))
+            self.alerts.send_soon(
+                f"eod-{summary['day']}",
+                f"TradingBot: end of day {summary['day']}",
+                format_eod_alert(summary),
+            )
+        except Exception:  # noqa: BLE001 - reporting must never break trading
+            log.exception("Failed to build/emit the end-of-day summary for %s", day)
 
     def _advisor_snapshot(self, equity: float) -> dict:
         """Compact, structured state handed to the AI advisor: everything a

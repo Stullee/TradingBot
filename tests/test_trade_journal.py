@@ -52,6 +52,7 @@ def test_round_trip_with_context_reports_net_r(tmp_path):
     # net R against the intended half-point risk: (98/100) / 0.5
     assert rt["r_multiple"] == 1.96
     assert rt["strategy"] == "vwap_mean_reversion"
+    assert rt["intended_entry"] == 50.0  # enables slippage measurement in the EOD report
 
 
 def test_partial_fills_average_into_one_round_trip(tmp_path):

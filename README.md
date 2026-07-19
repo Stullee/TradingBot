@@ -46,6 +46,11 @@ running it directly (plain Python / your own server).
   commission, every completed round trip with net P&L and R-multiple — the
   ground truth for whether the bot actually makes money, shown on the
   dashboard and CLI report.
+- Emits an **end-of-day summary** at every UTC day rollover
+  (`logs/eod_reports.jsonl`, also logged and pushed to the alert webhook):
+  the day's trades with win rate/avg R, net P&L per currency, measured
+  entry slippage, equity vs day/week baselines, kill-switch state, and
+  shadow/news activity. On demand: `python -m tradingbot.eod [YYYY-MM-DD]`.
 - **Verifies every open position has a live stop-loss** once a minute and
   re-attaches one if the bracket's children died (expired DAY orders,
   rejections, restarts) — plus optional **webhook alerts**

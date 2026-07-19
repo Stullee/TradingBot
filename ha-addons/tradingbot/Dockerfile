@@ -36,5 +36,6 @@ COPY addon_entrypoint.py /app/addon_entrypoint.py
 COPY addon_backtest_entrypoint.py /app/addon_backtest_entrypoint.py
 COPY addon_compare_entrypoint.py /app/addon_compare_entrypoint.py
 COPY addon_report_entrypoint.py /app/addon_report_entrypoint.py
+COPY addon_eod_entrypoint.py /app/addon_eod_entrypoint.py
 
 CMD ["python", "addon_entrypoint.py"]

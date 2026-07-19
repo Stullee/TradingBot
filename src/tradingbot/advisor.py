@@ -125,7 +125,59 @@ class TradingAdvisor:
                             continue
         except OSError:
             return None
-        return latest
+        # Normalized on load too, so a malformed report persisted by an
+        # earlier version can't keep breaking consumers after an upgrade.
+        return self._normalize_report(latest) if latest is not None else None
+
+    @staticmethod
+    def _normalize_report(report: dict) -> dict:
+        """Coerces a report into the shape consumers rely on. Even with a
+        forced-tool schema the model can return degenerate shapes
+        (confirmed live: `observations` as one plain string instead of a
+        list -- the dashboard's `.map()` over it threw and blanked the
+        entire page). Every field is clamped: health to the enum,
+        assessment to a string, observations to a list of strings,
+        recommendations to a list of {title, detail, priority} dicts."""
+        report = dict(report)
+        if report.get("health") not in ("OK", "WARNING", "CRITICAL"):
+            log.warning(
+                "Advisor report missing/invalid health field (got %r, keys=%s) "
+                "-- treating as WARNING.",
+                report.get("health"),
+                sorted(report),
+            )
+            report["health"] = "WARNING"
+        report["assessment"] = str(report.get("assessment") or "")
+
+        observations = report.get("observations")
+        if isinstance(observations, str):
+            observations = [observations]
+        elif not isinstance(observations, list):
+            observations = []
+        report["observations"] = [str(o) for o in observations]
+
+        recommendations = report.get("recommendations")
+        if isinstance(recommendations, (str, dict)):
+            recommendations = [recommendations]
+        elif not isinstance(recommendations, list):
+            recommendations = []
+        normalized_recs = []
+        for rec in recommendations:
+            if isinstance(rec, str):
+                rec = {"title": rec}
+            if not isinstance(rec, dict):
+                continue
+            normalized_recs.append(
+                {
+                    "title": str(rec.get("title") or ""),
+                    "detail": str(rec.get("detail") or ""),
+                    "priority": rec.get("priority")
+                    if rec.get("priority") in ("low", "medium", "high")
+                    else "medium",
+                }
+            )
+        report["recommendations"] = normalized_recs
+        return report
 
     @property
     def due(self) -> bool:
@@ -164,15 +216,7 @@ class TradingAdvisor:
         )
         for block in response.content:
             if block.type == "tool_use":
-                report = dict(block.input)
-                if report.get("health") not in ("OK", "WARNING", "CRITICAL"):
-                    log.warning(
-                        "Advisor report missing/invalid health field (got %r, keys=%s) "
-                        "-- treating as WARNING.",
-                        report.get("health"),
-                        sorted(report),
-                    )
-                    report["health"] = "WARNING"
+                report = self._normalize_report(dict(block.input))
                 report["generated_at"] = datetime.now(timezone.utc).isoformat()
                 report["model"] = self._model
                 self.latest_report = report

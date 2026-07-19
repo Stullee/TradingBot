@@ -161,15 +161,22 @@ function renderLiveTrades(lt) {
 function renderAdvisor(a) {
   if (!a) return '<div class="empty">AI advisor disabled, or no report yet.</div>';
   var color = a.health === "OK" ? "pos" : (a.health === "CRITICAL" ? "neg" : "");
-  var html = "<div><span class='" + color + "'><b>" + a.health + "</b></span> &mdash; " +
+  var html = "<div><span class='" + color + "'><b>" + (a.health || "?") + "</b></span> &mdash; " +
     (a.generated_at || "").slice(0, 16).replace("T", " ") + " UTC</div><p>" + (a.assessment || "") + "</p>";
-  if (a.observations && a.observations.length) {
-    html += "<ul>" + a.observations.map(function(o) { return "<li>" + o + "</li>"; }).join("") + "</ul>";
+  // Server-side normalization guarantees arrays, but stay defensive anyway:
+  // one malformed field must never take down the whole page render
+  // (confirmed live: a string `observations` threw in .map() and blanked
+  // the entire dashboard behind "Failed to load status").
+  var obs = Array.isArray(a.observations) ? a.observations : [];
+  if (obs.length) {
+    html += "<ul>" + obs.map(function(o) { return "<li>" + o + "</li>"; }).join("") + "</ul>";
   }
-  if (a.recommendations && a.recommendations.length) {
+  var recs = Array.isArray(a.recommendations) ? a.recommendations : [];
+  if (recs.length) {
     html += "<table><tr><th>Priority</th><th>Recommendation</th><th>Detail</th></tr>" +
-      a.recommendations.map(function(r) {
-        return "<tr><td>" + r.priority + "</td><td>" + r.title + "</td><td>" + r.detail + "</td></tr>";
+      recs.map(function(r) {
+        r = r && typeof r === "object" ? r : {title: String(r)};
+        return "<tr><td>" + (r.priority || "-") + "</td><td>" + (r.title || "") + "</td><td>" + (r.detail || "") + "</td></tr>";
       }).join("") + "</table>";
   }
   return html;
@@ -289,7 +296,14 @@ function refresh() {
       document.getElementById("app").innerHTML = '<div class="err">' + data.error + "</div>";
       return;
     }
-    render(data);
+    // A rendering bug must say so, not masquerade as "failed to load" --
+    // the data arrived fine (confirmed live: one malformed advisor field
+    // made the whole page report a load failure).
+    try {
+      render(data);
+    } catch (err) {
+      document.getElementById("app").innerHTML = '<div class="err">Render error: ' + err + "</div>";
+    }
   }).catch(function(err) {
     clearTimeout(timer);
     var msg = timedOut

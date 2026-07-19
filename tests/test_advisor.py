@@ -85,6 +85,36 @@ def test_missing_health_defaults_to_warning(tmp_path):
     assert advisor.latest_report["health"] == "WARNING"
 
 
+def test_degenerate_field_shapes_are_normalized(tmp_path):
+    """Confirmed live: the model returned `observations` as one plain
+    string; the dashboard's .map() over it threw and blanked the page.
+    Every list field must be coerced to the shape consumers rely on."""
+    weird = {
+        "health": "OK",
+        "assessment": "sample too small",
+        "observations": "just one string",
+        "recommendations": "collect more data",
+    }
+    advisor = make_advisor(tmp_path, weird)
+    report = run(advisor.maybe_run({}))
+    assert report["observations"] == ["just one string"]
+    assert report["recommendations"] == [
+        {"title": "collect more data", "detail": "", "priority": "medium"}
+    ]
+
+
+def test_malformed_persisted_report_is_normalized_on_load(tmp_path):
+    """A bad report written by an earlier version must not keep breaking
+    the dashboard after an upgrade -- normalization applies on load too."""
+    (tmp_path / "advisor_reports.jsonl").write_text(
+        json.dumps({"assessment": "a", "observations": "s", "recommendations": None}) + "\n"
+    )
+    advisor = TradingAdvisor(api_key="test", model="m", interval_min=60, log_dir=tmp_path)
+    assert advisor.latest_report["health"] == "WARNING"
+    assert advisor.latest_report["observations"] == ["s"]
+    assert advisor.latest_report["recommendations"] == []
+
+
 def test_failed_call_returns_none_and_rearms(tmp_path):
     advisor = TradingAdvisor(api_key="test", model="test-model", interval_min=60, log_dir=tmp_path)
 

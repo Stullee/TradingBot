@@ -1,6 +1,6 @@
 ---
 name: TradingBot (IB Day Trading)
-version: "0.8.0"
+version: "0.8.1"
 slug: tradingbot
 description: >-
   Automated day-trading bot for Interactive Brokers across US/EU/Asia stocks

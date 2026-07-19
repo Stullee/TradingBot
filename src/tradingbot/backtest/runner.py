@@ -119,6 +119,8 @@ async def _process_symbol(
         settings.target_atr_mult,
         vwap_tz=preset.timezone,
         trend_ema_period=settings.trend_ema_period,
+        commission_per_share=settings.backtest_commission_per_share,
+        slippage_bps=settings.backtest_slippage_bps,
     )
     s = summarize(trades)
     pf = "inf" if s.profit_factor == float("inf") else f"{s.profit_factor:.2f}"
@@ -134,7 +136,11 @@ async def run() -> None:
     settings = load_settings()
     strategy = build_strategy(settings)
     print(f"Strategy: {settings.strategy}  Duration: {settings.backtest_duration}  "
-          f"Bar size: {settings.bar_size}\n")
+          f"Bar size: {settings.bar_size}")
+    print(
+        f"Fill model: entries at next bar's open, slippage={settings.backtest_slippage_bps:g} bps "
+        f"per market fill, commission={settings.backtest_commission_per_share:g}/share/side\n"
+    )
 
     # Distinct client id so this can run alongside the live/paper engine
     # (same host/port) without IB rejecting one connection as a duplicate.
@@ -180,10 +186,10 @@ async def run() -> None:
     if overall.trade_count > 0:
         verdict = "positive" if overall.avg_r > 0 else "negative"
         print(
-            f"\nExpectancy is {verdict} ({overall.avg_r:+.3f} R/trade average). "
-            "Treat this as a rough signal, not proof -- see the backtesting "
-            "caveats (overfitting, look-ahead bias, no slippage/commission "
-            "modeling) before trusting it too far."
+            f"\nExpectancy is {verdict} ({overall.avg_r:+.3f} R/trade average), "
+            "after the configured slippage/commission model with next-bar-open "
+            "entry fills. Treat this as a rough signal, not proof -- a "
+            "good-looking window can still be overfit to that window."
         )
 
 

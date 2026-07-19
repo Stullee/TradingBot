@@ -24,17 +24,16 @@ def test_print_shadow_trading_with_data(capsys):
 
 
 def test_print_news_analysis_empty(capsys):
-    _print_news_analysis(NewsAnalysisStatus(0, 0, 0.0, {}), Path("news_analysis.jsonl"))
+    _print_news_analysis(NewsAnalysisStatus(0, 0.0, {}), Path("news_analysis.jsonl"))
     out = capsys.readouterr().out
     assert "No articles assessed yet" in out
 
 
 def test_print_news_analysis_with_data(capsys):
     status = NewsAnalysisStatus(
-        assessed=2, skipped=1, avg_confidence=0.45, direction_counts={"LONG": 1, "NONE": 1}
+        assessed=2, avg_confidence=0.45, direction_counts={"LONG": 1, "NONE": 1}
     )
     _print_news_analysis(status, Path("news_analysis.jsonl"))
     out = capsys.readouterr().out
     assert "Batches assessed: 2" in out
-    assert "Skipped (shadow trade already open): 1" in out
     assert "'LONG': 1" in out

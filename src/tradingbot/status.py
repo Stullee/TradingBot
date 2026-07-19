@@ -12,6 +12,14 @@ from pathlib import Path
 from ib_async import ExecutionFilter
 
 from tradingbot.broker.connection import BrokerConnection
+from tradingbot.execution.trade_journal import LiveTradeStats, summarize_live_trades
+
+
+def gather_live_trades_status(path: Path, recent_limit: int = 10) -> tuple[LiveTradeStats, list[dict]]:
+    """Round-trip stats from the real-trade journal (see
+    execution.trade_journal) -- win rate, avg R and net P&L *including
+    commissions*, the ground truth for whether the bot makes money."""
+    return summarize_live_trades(path, recent_limit)
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -129,15 +137,16 @@ def gather_shadow_trading_status(path: Path) -> ShadowTradingStatus:
 @dataclass
 class NewsAnalysisStatus:
     assessed: int
-    skipped: int
     avg_confidence: float
     direction_counts: dict[str, int] = field(default_factory=dict)
 
 
 def gather_news_analysis_status(path: Path) -> NewsAnalysisStatus:
     records = read_jsonl(path)
+    # Records with a skipped_reason only exist in journals written by old
+    # versions (articles are never skipped anymore, only deferred) -- they
+    # carry no assessment, so exclude them from the stats.
     assessed = [r for r in records if r.get("skipped_reason") is None]
-    skipped = [r for r in records if r.get("skipped_reason") is not None]
     by_direction: dict[str, int] = defaultdict(int)
     for r in assessed:
         by_direction[r.get("direction") or "NONE"] += 1
@@ -145,7 +154,6 @@ def gather_news_analysis_status(path: Path) -> NewsAnalysisStatus:
     avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
     return NewsAnalysisStatus(
         assessed=len(assessed),
-        skipped=len(skipped),
         avg_confidence=avg_confidence,
         direction_counts=dict(by_direction),
     )

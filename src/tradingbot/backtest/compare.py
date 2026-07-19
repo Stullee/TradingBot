@@ -68,6 +68,8 @@ def compare_symbol(
     allow_shorting: bool,
     vwap_tz: str = "US/Eastern",
     train_fraction: float = TRAIN_FRACTION,
+    commission_per_share: float = 0.0,
+    slippage_bps: float = 0.0,
 ) -> SymbolComparison:
     """Enriches `df` once (with the trend_ema column present, since the
     filtered variant needs it -- the baseline variant simply never reads
@@ -100,10 +102,22 @@ def compare_symbol(
     def run(slice_df: pd.DataFrame) -> SplitResult:
         return SplitResult(
             baseline_trades=simulate_enriched(
-                slice_df, baseline_strategy, symbol, stop_atr_mult, target_atr_mult
+                slice_df,
+                baseline_strategy,
+                symbol,
+                stop_atr_mult,
+                target_atr_mult,
+                commission_per_share=commission_per_share,
+                slippage_bps=slippage_bps,
             ),
             filtered_trades=simulate_enriched(
-                slice_df, filtered_strategy, symbol, stop_atr_mult, target_atr_mult
+                slice_df,
+                filtered_strategy,
+                symbol,
+                stop_atr_mult,
+                target_atr_mult,
+                commission_per_share=commission_per_share,
+                slippage_bps=slippage_bps,
             ),
         )
 

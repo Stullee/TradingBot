@@ -28,6 +28,12 @@ class MarketPreset:
     # Whether bars/orders should request data and allow fills outside the
     # open/close window -- used for US pre/post-market extended hours.
     outside_rth: bool = False
+    # pandas_market_calendars calendar name for holiday/early-close
+    # awareness (see tradingbot.calendars). None = static hours only.
+    # Note: per-symbol @EXCHANGE overrides within a market group still use
+    # the group's calendar (e.g. VOD@LSE under EU uses Xetra's calendar) --
+    # same approximation the static session hours already made.
+    calendar_name: str | None = None
 
 
 BUILTIN_MARKETS: dict[str, MarketPreset] = {
@@ -47,6 +53,7 @@ BUILTIN_MARKETS: dict[str, MarketPreset] = {
         open_time="09:30",
         close_time="16:00",
         outside_rth=False,
+        calendar_name="NYSE",
     ),
     "EU": MarketPreset(
         name="EU",
@@ -56,6 +63,7 @@ BUILTIN_MARKETS: dict[str, MarketPreset] = {
         timezone="Europe/Berlin",
         open_time="09:00",
         close_time="17:30",
+        calendar_name="XETR",
     ),
     "ASIA": MarketPreset(
         name="ASIA",
@@ -65,6 +73,7 @@ BUILTIN_MARKETS: dict[str, MarketPreset] = {
         timezone="Asia/Hong_Kong",
         open_time="09:30",
         close_time="16:00",
+        calendar_name="XHKG",
     ),
     "CRYPTO": MarketPreset(
         name="CRYPTO",
@@ -95,7 +104,16 @@ def build_session(
     preset: MarketPreset,
     no_new_entries_before_close_min: int,
     flatten_before_close_min: int,
+    entry_delay_after_open_min: int = 0,
+    use_calendar: bool = True,
 ) -> MarketSession:
+    from tradingbot.calendars import create_exchange_calendar
+
+    calendar = (
+        create_exchange_calendar(preset.calendar_name, preset.timezone)
+        if use_calendar and not preset.always_open
+        else None
+    )
     return MarketSession(
         timezone=preset.timezone,
         open_time=preset.open_time,
@@ -104,4 +122,6 @@ def build_session(
         flatten_before_close_min=flatten_before_close_min,
         always_open=preset.always_open,
         trade_weekends=preset.always_open,
+        calendar=calendar,
+        entry_delay_after_open_min=entry_delay_after_open_min,
     )

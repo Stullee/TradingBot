@@ -92,6 +92,8 @@ async def _process_symbol(
         settings.trend_ema_period,
         settings.allow_shorting,
         vwap_tz=preset.timezone,
+        commission_per_share=settings.backtest_commission_per_share,
+        slippage_bps=settings.backtest_slippage_bps,
     )
     line = (
         f"{spec.symbol:8s} bars={len(df):5d}  "

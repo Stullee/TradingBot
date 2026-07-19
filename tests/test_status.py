@@ -58,7 +58,9 @@ def test_shadow_trading_status_computes_win_rate_and_avg_r(tmp_path):
     assert status.avg_r == (2.0 - 1.0 + 0.3) / 3
 
 
-def test_news_analysis_status_separates_skipped_from_assessed(tmp_path):
+def test_news_analysis_status_excludes_legacy_skipped_records(tmp_path):
+    """Old journal versions wrote skip records with a skipped_reason; they
+    carry no assessment and must not count toward the stats."""
     path = tmp_path / "news_analysis.jsonl"
     write_jsonl(
         path,
@@ -70,7 +72,6 @@ def test_news_analysis_status_separates_skipped_from_assessed(tmp_path):
     )
     status = gather_news_analysis_status(path)
     assert status.assessed == 2
-    assert status.skipped == 1
     assert status.direction_counts == {"LONG": 1, "NONE": 1}
     assert status.avg_confidence == (0.8 + 0.1) / 2
 

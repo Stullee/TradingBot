@@ -24,10 +24,18 @@ def run(coro):
 
 
 def make_engine() -> TradingEngine:
-    settings = Settings(ib_port=7497, symbols="AAPL")
+    # max_weekly_loss_pct=0 so these tests exercise the *daily* baseline
+    # semantics in isolation (the weekly breaker has its own tests in
+    # test_risk_manager.py -- with the default 5% it would trip on the
+    # equity drops simulated here).
+    settings = Settings(ib_port=7497, symbols="AAPL", max_weekly_loss_pct=0)
     engine = TradingEngine(settings)
     engine.bars = FakeBars()
-    engine.orders = SimpleNamespace(flatten_all=lambda: None)
+    engine.orders = SimpleNamespace(
+        flatten_all=lambda: None,
+        pending_entry_conids=lambda: set(),
+        has_pending_entry=lambda con_id: False,
+    )
     for market in list(engine.market_sessions):
         engine.market_sessions[market] = AlwaysClosedSession()
     return engine

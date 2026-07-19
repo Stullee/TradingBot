@@ -9,21 +9,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ib_async import Contract
 
-from tradingbot.broker.connection import BrokerConnection
+from tradingbot.advisor import TradingAdvisor
+from tradingbot.alerts import AlertSender
+from tradingbot.broker.connection import BrokerConnection, ContractMeta
 from tradingbot.config import Settings
 from tradingbot.data.bars import BarStream, parse_bar_size_seconds
-from tradingbot.data.indicators import add_indicators
+from tradingbot.data.indicators import add_indicators, atr
 from tradingbot.execution.order_manager import OrderManager
+from tradingbot.execution.trade_journal import TradeJournal, summarize_live_trades
 from tradingbot.fx import FxConverter
 from tradingbot.market_hours import MarketSession
 from tradingbot.markets import BUILTIN_MARKETS, build_session
 from tradingbot.news.monitor import NewsMonitor
 from tradingbot.risk.manager import RiskManager
+from tradingbot.status import gather_shadow_trading_status
 from tradingbot.strategy.base import Signal, Strategy
 from tradingbot.strategy.ema_rsi_momentum import EmaRsiVwapMomentum
 from tradingbot.strategy.trendline_breakout import TrendlineBreakout
@@ -36,6 +41,12 @@ log = logging.getLogger(__name__)
 POLL_INTERVAL_SEC = 10
 POLLED_BARS_REFRESH_SEC = 60
 STALE_BAR_CHECK_SEC = 60
+# How often to verify every open position still has a live protective stop
+# (bracket children can die without the position: DAY orders expiring while
+# a position survives an early close, a rejected child, a restart
+# mid-bracket). A position without its stop is the exact unbounded-loss
+# situation the bracket exists to prevent.
+PROTECTION_CHECK_SEC = 60
 # At least 3 bar intervals with no new bar (and at least 10 min regardless,
 # for small bar sizes) before treating a live stream as stalled -- normal
 # bar-close timing jitter shouldn't false-positive, but IB market data farm
@@ -105,8 +116,33 @@ class TradingEngine:
             max_daily_loss_pct=settings.max_daily_loss_pct,
             max_concurrent_positions=settings.max_concurrent_positions,
             max_position_pct=settings.max_position_pct,
+            max_weekly_loss_pct=settings.max_weekly_loss_pct,
+            max_open_risk_pct=settings.max_open_risk_pct,
         )
         self.contracts: dict[str, Contract] = {}
+        self.contract_meta: dict[str, ContractMeta] = {}
+        self.journal = TradeJournal(Path(settings.log_dir) / "trades.jsonl")
+        self.alerts = AlertSender(settings.alert_webhook_url)
+        self.advisor: TradingAdvisor | None = None
+        if settings.enable_ai_advisor:
+            self.advisor = TradingAdvisor(
+                api_key=settings.anthropic_api_key,
+                model=settings.advisor_model,
+                interval_min=settings.advisor_interval_min,
+                log_dir=Path(settings.log_dir),
+            )
+        # Entry-to-stop risk (% of equity) per symbol with an open or
+        # in-flight position -- summed into the portfolio heat handed to
+        # RiskManager.can_open_new_position. Pruned once flat.
+        self._open_risk_pct: dict[str, float] = {}
+        # Entries placed within the current tick, counted immediately --
+        # ib.positions() lags fills, so without this every symbol signaling
+        # in the same tick would see the same stale position count and blow
+        # through max_concurrent_positions together.
+        self._entries_this_tick = 0
+        # Kill-switch flatten fires once per trip, not every 10s tick.
+        self._kill_flatten_done = False
+        self._last_protection_check = 0.0
         # The newest bar's own start-timestamp per symbol, last seen by
         # _process_symbol -- None means no bar has been processed yet. Used
         # to detect a genuinely new closed bar; see _process_symbol's
@@ -126,6 +162,7 @@ class TradingEngine:
                 BUILTIN_MARKETS[market_name],
                 settings.no_new_entries_before_close_min,
                 settings.flatten_before_close_min,
+                entry_delay_after_open_min=settings.no_entries_after_open_min,
             )
             for market_name in self.symbols_by_market
         }
@@ -149,7 +186,7 @@ class TradingEngine:
     async def _run_dashboard_safely(self) -> None:
         try:
             await run_dashboard(
-                self.broker, self.settings, self.latest_signals, self.news_monitor
+                self.broker, self.settings, self.latest_signals, self.news_monitor, self.advisor
             )
         except asyncio.CancelledError:
             raise
@@ -192,6 +229,7 @@ class TradingEngine:
                 continue
 
             self.contracts[spec.symbol] = contract
+            self.contract_meta[spec.symbol] = await self.broker.contract_meta(contract)
             self._last_bar_start[spec.symbol] = None
 
         if not self.contracts:
@@ -203,9 +241,25 @@ class TradingEngine:
         equity = self.broker.account_net_liquidation()
         self.base_currency = self.broker.account_base_currency()
         self._trading_day = datetime.now(timezone.utc).date()
-        self.risk.start_new_session(equity)
+        # Restore (not reset) today's loss baseline and any latched kill
+        # switch if this is a same-day restart -- a restart must not grant a
+        # fresh daily loss budget against already-depleted equity.
+        self.risk.enable_persistence(Path(self.settings.log_dir) / "risk_state.json")
+        self.risk.start_or_restore_session(equity, self._trading_day)
         self.broker.enable_realized_pnl_persistence(
             Path(self.settings.log_dir) / "realized_pnl.json"
+        )
+
+        self.journal.attach(self.broker.ib)
+        self.journal.seed_positions(
+            [
+                (p.contract.symbol, p.position, p.avgCost, p.contract.currency)
+                for p in self.broker.ib.positions()
+                if p.position
+            ]
+        )
+        self.broker.on_critical_order_error = lambda req_id, code, message: self.alerts.send_soon(
+            f"order-error-{code}", "TradingBot: order error", f"IB error {code}: {message}"
         )
 
         if self.settings.enable_news_monitor:
@@ -214,8 +268,15 @@ class TradingEngine:
                 self.bars,
                 self._is_symbol_market_open,
                 self._should_flatten_shadow_trade,
+                symbols=list(self.contracts),
             )
             log.info("News sentiment shadow-trading enabled (observation only).")
+        if self.advisor is not None:
+            log.info(
+                "AI advisor enabled (model=%s, every %d min) -- advisory only, no order authority.",
+                self.settings.advisor_model,
+                self.settings.advisor_interval_min,
+            )
 
         if self.settings.enable_dashboard:
             self._dashboard_task = asyncio.create_task(self._run_dashboard_safely())
@@ -242,6 +303,13 @@ class TradingEngine:
             raise
         finally:
             self.orders.flatten_all()
+            # Give the flatten orders a moment to reach IB before the socket
+            # closes -- disconnecting immediately can drop them unsent,
+            # leaving positions open after a "clean" shutdown.
+            try:
+                await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                pass
             self.bars.unsubscribe_all()
             self.fx.unsubscribe_all()
             if self._dashboard_task is not None:
@@ -249,6 +317,9 @@ class TradingEngine:
             self.broker.disconnect()
             if self.news_monitor is not None:
                 await self.news_monitor.aclose()
+            if self.advisor is not None:
+                await self.advisor.aclose()
+            await self.alerts.aclose()
 
     def _drop_symbol(self, spec: SymbolSpec) -> None:
         """Removes a symbol that failed to qualify from the active trading set,
@@ -333,19 +404,51 @@ class TradingEngine:
         today = datetime.now(timezone.utc).date()
         if today != self._trading_day:
             self._trading_day = today
-            self.risk.start_new_session(equity)
+            self.risk.start_new_session(equity, today)
             log.info("New UTC trading day (%s): risk manager session reset, equity=%.2f", today, equity)
 
-        if self.risk.check_daily_loss_limit(equity):
-            self.orders.flatten_all()
+        if self.risk.check_loss_limits(equity):
+            # Flatten once per trip, not every 10s for the rest of the day.
+            if not self._kill_flatten_done:
+                self.orders.flatten_all()
+                self._kill_flatten_done = True
+                which = "weekly" if self.risk.weekly_kill_switch_active else "daily"
+                self.alerts.send_soon(
+                    f"kill-switch-{which}",
+                    f"TradingBot: {which} loss limit breached",
+                    f"The {which} loss kill switch is active. All positions flattened; "
+                    "no new entries until it resets.",
+                )
             return
+        self._kill_flatten_done = False
 
-        open_position_count = sum(
-            1 for contract in self.contracts.values() if self._position_qty(contract) != 0
-        )
+        if now - self._last_protection_check >= PROTECTION_CHECK_SEC:
+            self._last_protection_check = now
+            self._ensure_protective_stops()
+
+        # Pending (placed but unfilled) entries count as occupied position
+        # slots; their risk stays counted until the position is flat again.
+        pending_conids = self.orders.pending_entry_conids()
+        open_position_count = 0
+        for symbol, contract in self.contracts.items():
+            has_position = self._position_qty(contract) != 0
+            if has_position or contract.conId in pending_conids:
+                open_position_count += 1
+            elif symbol in self._open_risk_pct:
+                self._open_risk_pct.pop(symbol)
+        self._entries_this_tick = 0
 
         for market_name, session in self.market_sessions.items():
             await self._tick_market(market_name, session, equity, open_position_count)
+
+        if self.advisor is not None and self.advisor.due:
+            report = await self.advisor.maybe_run(self._advisor_snapshot(equity))
+            if report is not None and report.get("health") == "CRITICAL":
+                self.alerts.send_soon(
+                    "advisor-critical",
+                    "TradingBot: AI advisor reports CRITICAL",
+                    str(report.get("assessment", ""))[:800],
+                )
 
     async def _tick_market(
         self, market_name: str, session: MarketSession, equity: float, open_position_count: int
@@ -362,7 +465,7 @@ class TradingEngine:
         if not session.is_open():
             return
 
-        stop_new_entries = session.should_stop_new_entries()
+        stop_new_entries = session.should_stop_new_entries() or session.in_opening_delay()
         outside_rth = BUILTIN_MARKETS[market_name].outside_rth
 
         for symbol in symbols:
@@ -449,6 +552,105 @@ class TradingEngine:
                 RESUBSCRIBE_COOLDOWN_SEC,
             )
 
+    def _ensure_protective_stops(self) -> None:
+        """A position must never sit without a live stop-loss. The bracket
+        normally guarantees it, but the children can die while the position
+        survives: DAY orders expiring after an early close kept the position
+        overnight, a child rejected at an off-tick price, a restart
+        mid-bracket, manual intervention in TWS. Re-attaches a stop at the
+        entry's originally intended level (from the trade journal's entry
+        context) or, failing that, at the current ATR-based distance."""
+        for symbol, contract in self.contracts.items():
+            qty = self._position_qty(contract)
+            if qty == 0:
+                continue
+            spec = self.spec_by_symbol.get(symbol)
+            session = self.market_sessions.get(spec.market) if spec else None
+            if session is None or not session.is_open():
+                continue  # a stop can't trigger while the market is closed; rechecked at open
+            if self.orders.has_live_protective_stop(contract, qty):
+                continue
+            if self.orders.has_pending_close(contract, qty):
+                continue  # a flatten is already in flight
+
+            stop_price = self.journal.stop_price_for(symbol)
+            if stop_price is None:
+                stop_price = self._atr_fallback_stop(symbol, qty)
+            if stop_price is None:
+                log.error(
+                    "%s: position of %s has NO live stop and no price data to place one "
+                    "-- will retry next check.",
+                    symbol,
+                    qty,
+                )
+                continue
+            meta = self.contract_meta.get(symbol, ContractMeta())
+            outside_rth = BUILTIN_MARKETS[spec.market].outside_rth if spec else False
+            self.orders.place_protective_stop(
+                contract, qty, stop_price, outside_rth=outside_rth, min_tick=meta.min_tick
+            )
+            self.alerts.send_soon(
+                f"naked-position-{symbol}",
+                f"TradingBot: {symbol} position had no stop-loss",
+                f"Re-attached a protective stop @ {stop_price:.4f} to the open "
+                f"{symbol} position ({qty:+g}). Check how its original stop disappeared.",
+            )
+
+    def _atr_fallback_stop(self, symbol: str, position_qty: float) -> float | None:
+        """Stop level one configured ATR-multiple away from the latest close
+        -- bounded protection from *now* when the original intended stop is
+        unknown (e.g. context lost across a restart)."""
+        df = self.bars.dataframe(symbol)
+        if df is None or len(df) < self.settings.atr_period + 1:
+            return None
+        atr_value = float(atr(df, self.settings.atr_period).iloc[-1])
+        last_close = float(df["close"].iloc[-1])
+        if atr_value <= 0 or last_close <= 0:
+            return None
+        distance = atr_value * self.settings.stop_atr_mult
+        return last_close - distance if position_qty > 0 else last_close + distance
+
+    def _advisor_snapshot(self, equity: float) -> dict:
+        """Compact, structured state handed to the AI advisor: everything a
+        supervising analyst needs, nothing it could misread as an
+        instruction channel. Numbers only -- the advisor never sees or
+        touches order flow."""
+        log_dir = Path(self.settings.log_dir)
+        live_stats, recent_trades = summarize_live_trades(log_dir / "trades.jsonl")
+        shadow = gather_shadow_trading_status(log_dir / "shadow_trades.jsonl")
+        positions = [
+            {"symbol": p.contract.symbol, "qty": p.position, "avg_cost": p.avgCost}
+            for p in self.broker.ib.positions()
+            if p.position
+        ]
+        return {
+            "utc_time": datetime.now(timezone.utc).isoformat(),
+            "equity": equity,
+            "base_currency": self.base_currency,
+            "risk": {
+                "daily_kill_switch_active": self.risk.daily_kill_switch_active,
+                "weekly_kill_switch_active": self.risk.weekly_kill_switch_active,
+                "max_daily_loss_pct": self.settings.max_daily_loss_pct,
+                "max_weekly_loss_pct": self.settings.max_weekly_loss_pct,
+                "open_risk_pct": round(sum(self._open_risk_pct.values()), 3),
+                "max_open_risk_pct": self.settings.max_open_risk_pct,
+            },
+            "live_trades": asdict(live_stats),
+            "recent_round_trips": recent_trades[-5:],
+            "shadow_trading": asdict(shadow),
+            "open_positions": positions,
+            "config": {
+                "strategy": self.settings.strategy,
+                "bar_size": self.settings.bar_size,
+                "risk_per_trade_pct": self.settings.risk_per_trade_pct,
+                "stop_atr_mult": self.settings.stop_atr_mult,
+                "target_atr_mult": self.settings.target_atr_mult,
+                "allow_shorting": self.settings.allow_shorting,
+                "markets": {m: syms for m, syms in self.symbols_by_market.items()},
+            },
+            "latest_bar_signals": self.latest_signals,
+        }
+
     async def _process_symbol(
         self,
         symbol: str,
@@ -502,9 +704,15 @@ class TradingEngine:
                 self.orders.flatten_position(contract, position_qty)
             return
 
+        if self.orders.has_pending_entry(contract.conId):
+            return  # an entry order is already in flight -- don't stack a second one
+
         if stop_new_entries:
             return
-        if not self.risk.can_open_new_position(open_position_count):
+        if not self.risk.can_open_new_position(
+            open_position_count + self._entries_this_tick,
+            open_risk_pct=sum(self._open_risk_pct.values()),
+        ):
             return
 
         signal = self.strategy.generate_signal(enriched)
@@ -555,13 +763,32 @@ class TradingEngine:
             if spec.currency != self.base_currency
             else equity
         )
-        quantity = self.risk.position_size(equity_local, entry_price, stop_price)
+        meta = self.contract_meta.get(symbol, ContractMeta())
+        if spec.security_type == "CRYPTO":
+            # Fractional sizing -- whole-unit sizing made crypto untradeable
+            # (1 BTC needs ~$120k notional; with a 20% notional cap that's
+            # ~$600k equity before a single signal could ever fill).
+            size_increment = meta.size_increment if meta.size_increment > 0 else 1e-8
+            min_quantity = meta.min_size
+        else:
+            # Stocks stay whole-share, except venues with board lots larger
+            # than one share (e.g. SEHK), where IB reports the lot as the
+            # size increment and odd lots get rejected.
+            size_increment = meta.size_increment if meta.size_increment > 1 else 1.0
+            min_quantity = meta.min_size if meta.min_size > 1 else 0.0
+        quantity = self.risk.position_size(
+            equity_local,
+            entry_price,
+            stop_price,
+            min_size_increment=size_increment,
+            min_quantity=min_quantity,
+        )
         if quantity <= 0:
             log.info("%s: signal %s but computed position size is 0, skipping.", symbol, signal)
             return
 
         log.info(
-            "%s: %s signal -> %s %d shares @ ~%.2f %s, stop=%.2f, target=%.2f",
+            "%s: %s signal -> %s %s units @ ~%.2f %s, stop=%.2f, target=%.2f",
             symbol,
             signal,
             action,
@@ -572,5 +799,22 @@ class TradingEngine:
             target_price,
         )
         self.orders.place_bracket(
-            contract, action, quantity, stop_price, target_price, outside_rth=outside_rth
+            contract,
+            action,
+            quantity,
+            stop_price,
+            target_price,
+            outside_rth=outside_rth,
+            min_tick=meta.min_tick,
         )
+        self.journal.record_entry_context(
+            symbol,
+            direction=signal.value,
+            entry_ref_price=entry_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            strategy=self.settings.strategy,
+        )
+        if equity_local > 0:
+            self._open_risk_pct[symbol] = quantity * stop_dist / equity_local * 100.0
+        self._entries_this_tick += 1

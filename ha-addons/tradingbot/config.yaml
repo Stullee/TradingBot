@@ -48,11 +48,17 @@ options:
   allow_shorting: false
   risk_per_trade_pct: 0.5
   max_daily_loss_pct: 2.0
+  max_weekly_loss_pct: 5.0
   max_concurrent_positions: 10
   max_position_pct: 20
+  max_open_risk_pct: 3.0
   no_new_entries_before_close_min: 15
   flatten_before_close_min: 5
+  no_entries_after_open_min: 15
   log_level: "info"
+  alert_webhook_url: ""
+  backtest_commission_per_share: 0.005
+  backtest_slippage_bps: 1.0
   enable_news_monitor: false
   finnhub_api_key: ""
   anthropic_api_key: ""
@@ -61,6 +67,9 @@ options:
   news_poll_interval_sec: 300
   news_max_hold_min: 240
   enable_dashboard: true
+  enable_ai_advisor: false
+  advisor_model: "claude-sonnet-5"
+  advisor_interval_min: 60
 schema:
   ib_host: str
   ib_port: port
@@ -90,11 +99,17 @@ schema:
   allow_shorting: bool
   risk_per_trade_pct: float(0.01,20)
   max_daily_loss_pct: float(0.1,50)
+  max_weekly_loss_pct: float(0,50)
   max_concurrent_positions: int(1,20)
   max_position_pct: float(1,100)
+  max_open_risk_pct: float(0,50)
   no_new_entries_before_close_min: int(0,120)
   flatten_before_close_min: int(0,60)
+  no_entries_after_open_min: int(0,120)
   log_level: list(debug|info|warning|error)
+  alert_webhook_url: str
+  backtest_commission_per_share: float(0,1)
+  backtest_slippage_bps: float(0,100)
   enable_news_monitor: bool
   finnhub_api_key: password
   anthropic_api_key: password
@@ -103,3 +118,6 @@ schema:
   news_poll_interval_sec: int(60,3600)
   news_max_hold_min: int(5,1440)
   enable_dashboard: bool
+  enable_ai_advisor: bool
+  advisor_model: str
+  advisor_interval_min: int(5,1440)

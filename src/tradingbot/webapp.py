@@ -22,12 +22,14 @@ from pathlib import Path
 
 from aiohttp import web
 
+from tradingbot.advisor import TradingAdvisor
 from tradingbot.broker.connection import BrokerConnection
 from tradingbot.config import Settings
 from tradingbot.news.monitor import NewsMonitor
 from tradingbot.status import (
     gather_account_status,
     gather_latest_news_by_symbol,
+    gather_live_trades_status,
     gather_news_analysis_status,
     gather_shadow_trading_status,
 )
@@ -136,6 +138,43 @@ function renderRealized(byBymbol) {
     "<tr><td><b>Total</b></td><td class=\\"" + cls(total) + "\\"><b>" + fmt(total) + "</b></td></tr></table>";
 }
 
+function fmtPnlByCcy(obj) {
+  var keys = Object.keys(obj || {});
+  if (!keys.length) return "-";
+  return keys.map(function(c) { return fmt(obj[c]) + " " + c; }).join(", ");
+}
+
+function renderLiveTrades(lt) {
+  if (!lt.recent || !lt.recent.length) return '<div class="empty">No completed real trades yet.</div>';
+  var rows = lt.recent.slice().reverse().map(function(t) {
+    var r = t.r_multiple;
+    return "<tr><td>" + (t.closed_at || "").slice(0, 16).replace("T", " ") + "</td><td>" + t.symbol +
+      "</td><td>" + badge(t.direction) + "</td><td>" + fmt(t.qty, 4) + "</td><td>" + fmt(t.avg_entry, 4) +
+      "</td><td>" + fmt(t.avg_exit, 4) + "</td><td class='" + cls(t.net_pnl) + "'>" + fmt(t.net_pnl) +
+      " " + (t.currency || "") + "</td><td class='" + cls(r || 0) + "'>" +
+      (r !== null && r !== undefined ? fmt(r, 2) + "R" : "-") + "</td><td>" + (t.strategy || "-") + "</td></tr>";
+  }).join("");
+  return "<table><tr><th>Closed (UTC)</th><th>Symbol</th><th>Dir</th><th>Qty</th><th>Entry</th>" +
+    "<th>Exit</th><th>Net P&amp;L</th><th>R</th><th>Strategy</th></tr>" + rows + "</table>";
+}
+
+function renderAdvisor(a) {
+  if (!a) return '<div class="empty">AI advisor disabled, or no report yet.</div>';
+  var color = a.health === "OK" ? "pos" : (a.health === "CRITICAL" ? "neg" : "");
+  var html = "<div><span class='" + color + "'><b>" + a.health + "</b></span> &mdash; " +
+    (a.generated_at || "").slice(0, 16).replace("T", " ") + " UTC</div><p>" + (a.assessment || "") + "</p>";
+  if (a.observations && a.observations.length) {
+    html += "<ul>" + a.observations.map(function(o) { return "<li>" + o + "</li>"; }).join("") + "</ul>";
+  }
+  if (a.recommendations && a.recommendations.length) {
+    html += "<table><tr><th>Priority</th><th>Recommendation</th><th>Detail</th></tr>" +
+      a.recommendations.map(function(r) {
+        return "<tr><td>" + r.priority + "</td><td>" + r.title + "</td><td>" + r.detail + "</td></tr>";
+      }).join("") + "</table>";
+  }
+  return html;
+}
+
 function renderOpenShadowTrades(trades) {
   if (!trades.length) return '<div class="empty">No shadow trades currently open.</div>';
   var rows = trades.map(function(t) {
@@ -157,6 +196,14 @@ function render(data) {
   html += '<div class="cards">';
   html += '<div class="card"><div class="label">Equity</div><div class="value">' +
     fmt(data.equity) + " " + data.base_currency + "</div></div>";
+  html += '<div class="card"><div class="label">Real trades closed</div><div class="value">' +
+    data.live_trades.closed + "</div></div>";
+  html += '<div class="card"><div class="label">Real win rate</div><div class="value">' +
+    (data.live_trades.closed ? Math.round(data.live_trades.win_rate * 100) + "%" : "-") + "</div></div>";
+  html += '<div class="card"><div class="label">Real avg R (net)</div><div class="value ' +
+    cls(data.live_trades.avg_r || 0) + '">' +
+    (data.live_trades.avg_r !== null && data.live_trades.avg_r !== undefined ? fmt(data.live_trades.avg_r, 2) : "-") +
+    "</div></div>";
   html += '<div class="card"><div class="label">Shadow win rate</div><div class="value">' +
     (data.shadow.closed ? Math.round(data.shadow.win_rate * 100) + "%" : "-") + "</div></div>";
   html += '<div class="card"><div class="label">Shadow avg R</div><div class="value ' +
@@ -170,6 +217,13 @@ function render(data) {
   html += "<h2>Per-Symbol Signals</h2>" + renderSymbols(data.symbols);
   html += "<h2>Open Positions</h2>" + renderPositions(data.positions);
   html += "<h2>Today's Realized P&amp;L</h2>" + renderRealized(data.realized_pnl_by_symbol);
+
+  html += "<h2>Real Trades (journal, net of commissions)</h2>";
+  html += '<div class="empty">Net P&amp;L &mdash; all time: ' + fmtPnlByCcy(data.live_trades.net_pnl_by_currency) +
+    ' &middot; today: ' + fmtPnlByCcy(data.live_trades.today_net_pnl_by_currency) + "</div>";
+  html += renderLiveTrades(data.live_trades);
+
+  html += "<h2>AI Advisor</h2>" + renderAdvisor(data.advisor);
 
   html += "<h2>Open Shadow Trades</h2>" + renderOpenShadowTrades(data.open_shadow_trades);
 
@@ -187,11 +241,11 @@ function render(data) {
 
   html += "<h2>News Analysis Activity</h2>";
   var dirs = Object.keys(data.news.direction_counts);
-  if (!data.news.assessed && !data.news.skipped) {
+  if (!data.news.assessed) {
     html += '<div class="empty">No articles assessed yet.</div>';
   } else {
-    html += "<table><tr><th>Assessed batches</th><th>Skipped (trade open)</th><th>Avg confidence</th><th>Directions</th></tr><tr><td>" +
-      data.news.assessed + "</td><td>" + data.news.skipped + "</td><td>" + fmt(data.news.avg_confidence) +
+    html += "<table><tr><th>Assessed batches</th><th>Avg confidence</th><th>Directions</th></tr><tr><td>" +
+      data.news.assessed + "</td><td>" + fmt(data.news.avg_confidence) +
       "</td><td>" + (dirs.length ? dirs.map(function(d) { return d + ": " + data.news.direction_counts[d]; }).join(", ") : "-") +
       "</td></tr></table>";
   }
@@ -259,12 +313,14 @@ async def _status_payload(
     settings: Settings,
     latest_signals: dict[str, dict],
     news_monitor: NewsMonitor | None = None,
+    advisor: TradingAdvisor | None = None,
 ) -> dict:
     account = await gather_account_status(broker, include_fills=False)
     log_dir = Path(settings.log_dir)
     shadow = gather_shadow_trading_status(log_dir / "shadow_trades.jsonl")
     news = gather_news_analysis_status(log_dir / "news_analysis.jsonl")
     latest_news = gather_latest_news_by_symbol(log_dir / "news_analysis.jsonl")
+    live_stats, recent_trades = gather_live_trades_status(log_dir / "trades.jsonl")
     positions_by_symbol = {p.symbol: p for p in account.positions}
 
     symbols = []
@@ -309,6 +365,8 @@ async def _status_payload(
         "news": asdict(news),
         "symbols": symbols,
         "open_shadow_trades": open_shadow_trades,
+        "live_trades": {**asdict(live_stats), "recent": recent_trades},
+        "advisor": advisor.latest_report if advisor is not None else None,
     }
 
 
@@ -317,6 +375,7 @@ def create_app(
     settings: Settings,
     latest_signals: dict[str, dict] | None = None,
     news_monitor: NewsMonitor | None = None,
+    advisor: TradingAdvisor | None = None,
 ) -> web.Application:
     latest_signals = {} if latest_signals is None else latest_signals
 
@@ -335,7 +394,7 @@ def create_app(
         start = time.monotonic()
         try:
             data = await asyncio.wait_for(
-                _status_payload(broker, settings, latest_signals, news_monitor),
+                _status_payload(broker, settings, latest_signals, news_monitor, advisor),
                 timeout=_STATUS_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
@@ -360,13 +419,14 @@ async def run_dashboard(
     settings: Settings,
     latest_signals: dict[str, dict],
     news_monitor: NewsMonitor | None = None,
+    advisor: TradingAdvisor | None = None,
 ) -> None:
     """Runs until cancelled. The caller wraps this in a background task with
     broad exception handling -- a dashboard failure (e.g. the port already
     being in use) must never take down the trading engine it's reporting
     on. `latest_signals` is the engine's own live dict (see engine.py),
     shared by reference, not copied -- reads always see current values."""
-    app = create_app(broker, settings, latest_signals, news_monitor)
+    app = create_app(broker, settings, latest_signals, news_monitor, advisor)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", settings.dashboard_port)

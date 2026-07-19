@@ -45,12 +45,19 @@ your LAN (recommended) or directly on this Home Assistant host.
 | `atr_period`, `stop_atr_mult`, `target_atr_mult` | ATR-based stop-loss/take-profit distances |
 | `allow_shorting` | Enable short entries (disabled by default) |
 | `risk_per_trade_pct` | % of account equity risked per trade (stop-distance based) |
-| `max_daily_loss_pct` | Daily loss kill switch threshold |
-| `max_concurrent_positions` | Max number of simultaneous open positions |
+| `max_daily_loss_pct` | Daily loss kill switch threshold. Baselines and tripped switches persist across restarts — a restart never grants a fresh loss budget |
+| `max_weekly_loss_pct` | Weekly drawdown breaker: % loss since the ISO week's start that halts trading until next week (catches slow bleeds a daily limit never trips on). `0` disables |
+| `max_concurrent_positions` | Max number of simultaneous open positions (in-flight entry orders count) |
 | `max_position_pct` | Max % of equity allocated to a single position's notional |
+| `max_open_risk_pct` | Portfolio heat cap: total entry-to-stop risk across all open positions as % of equity. `0` disables |
 | `no_new_entries_before_close_min` | Stop opening new trades this many minutes before a market's close |
-| `flatten_before_close_min` | Force-close a market's positions this many minutes before its close |
+| `flatten_before_close_min` | Force-close a market's positions this many minutes before its close (early closes/holidays are calendar-aware) |
+| `no_entries_after_open_min` | No entries during the first N minutes after a market's open (opening-auction volatility). `0` disables |
 | `log_level` | `debug`, `info`, `warning`, or `error` |
+| `alert_webhook_url` | Optional webhook POSTed on kill-switch trips, positions found without a stop, and critical order rejections — point it at a Home Assistant webhook trigger for phone notifications. Empty disables |
+| `backtest_commission_per_share` / `backtest_slippage_bps` | Cost model for the backtest entrypoints (commission per share per side; adverse slippage per market fill) |
+| `enable_ai_advisor` | Periodic Claude-based supervisory analysis of the real-trade journal/risk state (advisory only, never places orders; needs `anthropic_api_key`). Shown on the dashboard. Disabled by default |
+| `advisor_model` / `advisor_interval_min` | Which Claude model the advisor uses, and how often (one API call per interval) |
 | `enable_news_monitor` | Enable news sentiment shadow-trading (see below). Disabled by default |
 | `finnhub_api_key` | API key from [finnhub.io](https://finnhub.io) (free tier available) |
 | `anthropic_api_key` | Your Anthropic API key, used to have Claude assess each news article |

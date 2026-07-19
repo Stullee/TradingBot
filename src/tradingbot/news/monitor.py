@@ -65,9 +65,15 @@ class NewsMonitor:
         bars: BarStream,
         is_market_open: Callable[[str], bool] | None = None,
         should_flatten_shadow_trade: Callable[[str, str], bool] | None = None,
+        symbols: list[str] | None = None,
     ):
         self.settings = settings
         self.bars = bars
+        # The engine passes its post-qualification symbol list so Finnhub/
+        # Claude budget isn't spent polling symbols that failed to qualify
+        # and were dropped at startup. Falls back to the raw config for
+        # callers without an engine (tests, one-off tools).
+        self.symbols = symbols if symbols is not None else settings.symbol_list
         # Whether `symbol`'s own market is currently open -- checked before
         # opening a shadow trade (see _handle_articles) so a news hit outside
         # trading hours doesn't "enter" at a last price that's really just a
@@ -200,7 +206,7 @@ class NewsMonitor:
            at. Skipping defers that check to the market's next real, fresh
            price instead of manufacturing an exit against a stale one.
         3. Otherwise, a normal stop/target/timeout update."""
-        for symbol in self.settings.symbol_list:
+        for symbol in self.symbols:
             trade = self.shadow.open_trades.get(symbol)
             if trade is None:
                 continue
@@ -294,7 +300,7 @@ class NewsMonitor:
         articles_assessed = 0
         articles_deferred = 0
 
-        for i, symbol in enumerate(self.settings.symbol_list):
+        for i, symbol in enumerate(self.symbols):
             if i > 0:
                 await asyncio.sleep(_FINNHUB_REQUEST_GAP_SEC)
             try:
@@ -316,6 +322,10 @@ class NewsMonitor:
             symbols_with_new_articles += 1
             new_articles.sort(key=lambda a: a.get("datetime", 0), reverse=True)
             batch = new_articles[:_MAX_ARTICLES_PER_BATCH]
+            # Newest-first was only for picking *which* articles make the
+            # cap; the prompt presents them oldest-first (and says so), so
+            # re-sort chronologically before handing them to Claude.
+            batch.sort(key=lambda a: a.get("datetime", 0))
             articles_assessed += len(batch)
             articles_deferred += len(new_articles) - len(batch)
             await self._handle_articles(symbol, batch)
@@ -324,7 +334,7 @@ class NewsMonitor:
             "News poll complete: %d/%d symbols had new articles, %d assessed, "
             "%d deferred to a later poll (batch cap=%d).",
             symbols_with_new_articles,
-            len(self.settings.symbol_list),
+            len(self.symbols),
             articles_assessed,
             articles_deferred,
             _MAX_ARTICLES_PER_BATCH,

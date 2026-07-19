@@ -41,7 +41,10 @@ def make_engine():
     # _process_symbol only reaches order placement if the strategy ever
     # returns non-FLAT; these tests use constant-price data specifically so
     # it won't, but stub orders anyway rather than rely on that.
-    engine.orders = SimpleNamespace(place_bracket=lambda *a, **kw: None)
+    engine.orders = SimpleNamespace(
+        place_bracket=lambda *a, **kw: None,
+        has_pending_entry=lambda con_id: False,
+    )
     spec = engine.symbol_specs[0]
     engine.contracts[spec.symbol] = FakeContract(spec.symbol)
     engine._last_bar_start[spec.symbol] = None

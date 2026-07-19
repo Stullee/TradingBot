@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from ib_async import IB, Contract, Crypto, PortfolioItem, Stock
@@ -11,6 +13,27 @@ from ib_async import IB, Contract, Crypto, PortfolioItem, Stock
 from tradingbot.config import Settings
 
 log = logging.getLogger(__name__)
+
+# IB error codes that mean an order we placed was refused or is broken --
+# the ones where "the bot thinks it has a bracket but doesn't" becomes
+# possible. Everything else (farm status chatter, warnings) is already
+# logged by ib_async itself at an appropriate level.
+#   103: duplicate order id            110: price does not conform to min tick
+#   200: no security definition        201: order rejected
+#   203: security not allowed          321: server-side validation error
+#   461/462: order held/rerouted oddities  10148: order to be cancelled is not valid
+CRITICAL_ORDER_ERROR_CODES = {103, 110, 200, 201, 203, 321, 461, 462, 10148}
+
+
+@dataclass(frozen=True)
+class ContractMeta:
+    """Per-contract trading increments from IB's ContractDetails. 0 means
+    "not reported" -- the engine then falls back to whole shares (stocks) or
+    a tiny fractional increment (crypto), reproducing sane defaults."""
+
+    min_tick: float = 0.01
+    size_increment: float = 0.0
+    min_size: float = 0.0
 
 
 class BrokerConnection:
@@ -28,6 +51,10 @@ class BrokerConnection:
         self.realized_pnl_by_symbol: dict[str, float] = {}
         self._realized_pnl_persist_path: Path | None = None
         self.ib.updatePortfolioEvent += self._on_portfolio_update
+        self.ib.errorEvent += self._on_ib_error
+        # Optional hook (set by the engine) invoked for CRITICAL_ORDER_ERROR
+        # codes -- e.g. to fire an alert webhook. Must never raise.
+        self.on_critical_order_error: Callable[[int, int, str], None] | None = None
         self._closing = False
         self._reconnect_task: asyncio.Task | None = None
 
@@ -50,6 +77,24 @@ class BrokerConnection:
                 self.realized_pnl_by_symbol.update(json.loads(path.read_text()))
             except (json.JSONDecodeError, OSError):
                 log.warning("Could not read %s, starting with no realized P&L history.", path)
+
+    def _on_ib_error(
+        self, reqId: int, errorCode: int, errorString: str, contract: Contract | None = None, *args
+    ) -> None:
+        """Surfaces order-refusal errors loudly and to the optional alert
+        hook. ib_async logs everything already, but rejections were easy to
+        miss in the stream -- and a rejected bracket child is a position
+        without its stop, which the engine's reconciliation pass then fixes
+        but a human should hear about."""
+        if errorCode not in CRITICAL_ORDER_ERROR_CODES:
+            return
+        symbol = getattr(contract, "symbol", None) or "?"
+        log.error("IB order error %s for %s (orderId/reqId=%s): %s", errorCode, symbol, reqId, errorString)
+        if self.on_critical_order_error is not None:
+            try:
+                self.on_critical_order_error(reqId, errorCode, f"{symbol}: {errorString}")
+            except Exception:  # noqa: BLE001 - alert failure must not break the event stream
+                log.exception("on_critical_order_error hook failed")
 
     def _on_portfolio_update(self, item: PortfolioItem) -> None:
         self.realized_pnl_by_symbol[item.contract.symbol] = item.realizedPNL
@@ -132,6 +177,33 @@ class BrokerConnection:
                 "the exchange field already disambiguates the listing)."
             )
         return qualified
+
+    async def contract_meta(self, contract: Contract) -> ContractMeta:
+        """Fetches the contract's minimum price tick and size increments so
+        orders conform to the venue's rules (HK tick bands/board lots,
+        fractional crypto sizes). Any failure falls back to defaults that
+        reproduce the old behavior rather than blocking the symbol."""
+        try:
+            details = await self.ib.reqContractDetailsAsync(contract)
+        except Exception as exc:  # noqa: BLE001 - metadata is best-effort
+            log.warning("Could not fetch contract details for %s: %s", contract.symbol, exc)
+            return ContractMeta()
+        if not details:
+            return ContractMeta()
+        d = details[0]
+
+        def _positive(value) -> float:
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                return 0.0
+            return v if v > 0 else 0.0
+
+        return ContractMeta(
+            min_tick=_positive(d.minTick) or 0.01,
+            size_increment=_positive(getattr(d, "sizeIncrement", 0.0)),
+            min_size=_positive(getattr(d, "minSize", 0.0)),
+        )
 
     def account_net_liquidation(self) -> float:
         account = self.settings.ib_account_id or ""

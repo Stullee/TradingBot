@@ -23,3 +23,10 @@ class Strategy(ABC):
     @abstractmethod
     def generate_signal(self, df: pd.DataFrame) -> Signal:
         """df must already contain indicator columns (see data.indicators.add_indicators)."""
+
+    @abstractmethod
+    def is_exit_signal(self, df: pd.DataFrame, position_is_long: bool) -> bool:
+        """Whether an open position should be closed now (independent of the
+        hard stop/target bracket, which always remains in place). The engine
+        and backtester both require this -- declared abstract so a custom
+        Strategy missing it fails at class definition, not mid-session."""

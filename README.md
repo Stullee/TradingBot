@@ -30,9 +30,27 @@ running it directly (plain Python / your own server).
 - Every entry is a **bracket order**: a market entry with an attached
   stop-loss and take-profit — no naked/unprotected positions are ever opened.
 - Enforces a hard **daily loss limit** (kill switch, across all markets):
-  once breached, no new trades are opened and everything is flattened.
-- Enforces a max number of concurrent positions (global, across all markets)
-  and a max notional per position.
+  once breached, no new trades are opened and everything is flattened. A
+  **weekly drawdown breaker** does the same for slow bleeds a daily limit
+  never catches, and both baselines/latched switches **persist across
+  restarts** (`logs/risk_state.json`) so a restart can never grant a fresh
+  loss budget.
+- Enforces a max number of concurrent positions (counting in-flight entry
+  orders, global across all markets), a max notional per position, and a
+  **portfolio heat cap** (total entry-to-stop risk across all open
+  positions as % of equity).
+- **Holiday/early-close aware** (via `pandas_market_calendars`): half-days
+  flatten before the *actual* early close instead of firing orders into a
+  closed exchange; holidays don't trade at all.
+- Keeps a **real-trade journal** (`logs/trades.jsonl`): every fill with its
+  commission, every completed round trip with net P&L and R-multiple — the
+  ground truth for whether the bot actually makes money, shown on the
+  dashboard and CLI report.
+- **Verifies every open position has a live stop-loss** once a minute and
+  re-attaches one if the bracket's children died (expired DAY orders,
+  rejections, restarts) — plus optional **webhook alerts**
+  (`ALERT_WEBHOOK_URL`) on kill switches, naked positions, and order
+  rejections.
 - **Never holds positions past a market's own session**: stops opening new
   trades a configurable number of minutes before that market's close, and
   force-flattens that market's positions shortly before it closes — this is
@@ -52,16 +70,20 @@ running it directly (plain Python / your own server).
 src/tradingbot/
   config.py            typed settings loaded from .env
   market_hours.py       generic timezone-aware session helper (MarketSession)
+  calendars.py           exchange holiday/early-close calendars (pandas_market_calendars)
   markets.py             built-in market presets: US/EU/ASIA/CRYPTO
   symbols.py              MARKETS config DSL parser -> per-symbol specs
   fx.py                   live currency conversion via IB forex quotes
-  broker/connection.py  IB connect/reconnect + multi-asset contract qualification
+  broker/connection.py  IB connect/reconnect + contract qualification + tick/lot metadata
   data/bars.py           live streaming historical bars per symbol
   data/indicators.py     EMA / RSI / ATR / session VWAP (pure pandas, no IB dependency)
   strategy/               pluggable Strategy interface + VwapMeanReversion (default) / EmaRsiVwapMomentum
-  risk/manager.py         position sizing + daily loss kill switch
-  execution/order_manager.py  bracket orders + per-market/global flatten
+  risk/manager.py         position sizing + daily/weekly kill switches + heat cap (persisted)
+  execution/order_manager.py  bracket orders + protective-stop reconciliation + flatten
+  execution/trade_journal.py  real-trade journal: fills, commissions, round-trip R (trades.jsonl)
   news/                   news sentiment shadow-trading (see below)
+  alerts.py               webhook alerts (kill switch, naked position, order rejects)
+  advisor.py              AI advisor: periodic Claude analysis of live results (see below)
   status.py               shared status/analytics gathering (IB + persisted logs)
   report.py                one-shot CLI status report (python -m tradingbot.report)
   webapp.py                live web dashboard, runs alongside the engine
@@ -202,12 +224,21 @@ R-multiples (P&L in units of initial risk, so it's comparable across
 symbols regardless of price): win rate, average R (expectancy), profit
 factor, max drawdown, and longest losing streak.
 
-**Read this before trusting the output:** this is a quick signal, not
-proof. It doesn't model slippage or commissions, assumes fills exactly at
-the stop/target price (real fills can gap past them), and a good-looking
-backtest can still be overfit to that particular historical window. See
-`src/tradingbot/backtest/stats.py`'s docstring for what "Sharpe" means
-here (a per-trade R-multiple proxy, not an annualized equity-curve Sharpe).
+**Fill model (matters!):** entries fill at the **next bar's open** (as live
+market orders actually do — a signal is only visible after its bar closes),
+stops are gap-aware (a bar opening beyond the stop fills at that open), and
+a configurable cost model applies commissions per share
+(`BACKTEST_COMMISSION_PER_SHARE`) plus adverse slippage
+(`BACKTEST_SLIPPAGE_BPS`) to every market fill. For a strategy whose edge
+is a fraction of ATR per trade, these are the difference between a real and
+an imaginary expectancy — set both to 0 only to see the frictionless
+fantasy number.
+
+**Read this before trusting the output:** still a quick signal, not proof —
+a good-looking backtest can be overfit to that particular historical
+window. See `src/tradingbot/backtest/stats.py`'s docstring for what
+"Sharpe" means here (a per-trade R-multiple proxy, not an annualized
+equity-curve Sharpe).
 
 ### Trend-filter before/after comparison
 
@@ -277,22 +308,43 @@ It also costs real money to run: one Finnhub call per symbol per poll
 interval, one Anthropic API call per new article seen. Keep the poll
 interval reasonable.
 
+## AI advisor (Claude supervising the bot)
+
+Set `ENABLE_AI_ADVISOR=true` (plus `ANTHROPIC_API_KEY`) to wire a Claude
+model in as a **supervisory analyst**. Every `ADVISOR_INTERVAL_MIN` it
+receives a structured snapshot — the real-trade journal (win rate, net avg
+R, per-symbol R), shadow-trading results, risk state (kill switches, heat),
+open positions, and the active config — and returns a structured
+assessment: overall health (OK/WARNING/CRITICAL), what's making or losing
+money, and concrete recommendations. Reports land in
+`logs/advisor_reports.jsonl`, on the dashboard, and in
+`python -m tradingbot.report`; a CRITICAL call also fires the alert
+webhook.
+
+**Deliberately advisory-only.** The AI has no order authority and can't
+change settings — the deterministic layers (brackets, kill switches,
+sizing) stay pure code, because a stochastic component must never be able
+to bypass hard risk guarantees. What it's genuinely good at is the
+tireless-analyst role: noticing that one symbol bled -4R this week, that
+all profits come from one market, or that the sample is still too small to
+conclude anything — and saying so, every hour, without getting bored.
+
 ## Known limitations / possible next steps
 
-- Market-hours logic doesn't account for exchange holidays or early closes —
-  plug in [`pandas_market_calendars`](https://pypi.org/project/pandas-market-calendars/)
-  for full holiday-awareness.
+- Exchange calendars cover the preset markets (NYSE, Xetra, Hong Kong);
+  per-symbol `@EXCHANGE` overrides within a group still use that group's
+  calendar and session hours.
 - Market presets (exchange/currency/session) are fixed in `markets.py`, not
   settings — covers one representative exchange per region (Xetra, Hong
   Kong); other exchanges need a per-symbol `@EXCHANGE@CURRENCY` override or
   editing the presets directly.
 - Hong Kong's midday trading halt isn't modeled as a split session.
-- The bundled strategy (EMA cross + RSI + VWAP) is a straightforward,
-  well-known starting point tuned for stocks, not a proven money-maker —
-  crypto's different volatility profile in particular hasn't been separately
-  validated. Backtest and paper trade before trusting any of it with real
-  capital.
-- No built-in backtesting engine yet; `strategy/` is decoupled from IB
-  specifically so historical OHLCV data can be replayed through the same
-  `generate_signal()` logic.
+- The bundled strategies are straightforward, well-known starting points,
+  not proven money-makers. Backtest (with the cost model on), paper trade,
+  and read the trade journal's net expectancy before trusting any of them
+  with real capital — and be aware US pattern-day-trader rules restrict
+  accounts under $25k.
+- News monitor symbol format is IB's; Finnhub uses different suffixes for
+  non-US listings (e.g. `SAP.DE`), so news coverage is effectively US-only
+  for now.
 - Single-process, single-account. No multi-account/portfolio allocation.

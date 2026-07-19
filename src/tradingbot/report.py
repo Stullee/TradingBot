@@ -19,8 +19,10 @@ from tradingbot.status import (
     NewsAnalysisStatus,
     ShadowTradingStatus,
     gather_account_status,
+    gather_live_trades_status,
     gather_news_analysis_status,
     gather_shadow_trading_status,
+    read_jsonl,
 )
 
 log = logging.getLogger(__name__)
@@ -66,6 +68,49 @@ def _print_account(status: AccountStatus) -> None:
     )
 
 
+def _print_live_trades(path: Path) -> None:
+    stats, recent = gather_live_trades_status(path)
+    print(f"=== Real Trades ({path.name}, net of commissions) ===")
+    if stats.closed == 0:
+        print("No completed round trips journaled yet.\n")
+        return
+    avg_r = "n/a" if stats.avg_r is None else f"{stats.avg_r:+.2f}"
+    pnl = ", ".join(f"{v:+,.2f} {c}" for c, v in stats.net_pnl_by_currency.items()) or "-"
+    today = ", ".join(f"{v:+,.2f} {c}" for c, v in stats.today_net_pnl_by_currency.items()) or "-"
+    print(
+        f"Closed: {stats.closed}  Win rate: {stats.win_rate:.0%}  Avg R (net): {avg_r}\n"
+        f"Net P&L all time: {pnl}   today: {today}"
+    )
+    if stats.r_by_symbol:
+        ranked = sorted(stats.r_by_symbol.items(), key=lambda x: x[1])
+        worst = ", ".join(f"{s} {r:+.1f}R" for s, r in ranked[:3])
+        best = ", ".join(f"{s} {r:+.1f}R" for s, r in ranked[-3:][::-1])
+        print(f"Best symbols: {best}\nWorst symbols: {worst}")
+    if recent:
+        print("Recent:")
+        for t in recent[-5:]:
+            r = "n/a" if t.get("r_multiple") is None else f"{t['r_multiple']:+.2f}R"
+            print(
+                f"  {(t.get('closed_at') or '')[:16]:16s} {t.get('symbol', ''):8s} "
+                f"{t.get('direction', ''):5s} net={t.get('net_pnl', 0):+.2f} {t.get('currency', '')} ({r})"
+            )
+    print()
+
+
+def _print_advisor(path: Path) -> None:
+    reports = read_jsonl(path)
+    print(f"=== AI Advisor ({path.name}) ===")
+    if not reports:
+        print("No advisor reports yet (ENABLE_AI_ADVISOR=false, or none generated).\n")
+        return
+    latest = reports[-1]
+    print(f"[{latest.get('health', '?')}] {latest.get('generated_at', '')}")
+    print(latest.get("assessment", ""))
+    for rec in latest.get("recommendations", []):
+        print(f"  - ({rec.get('priority')}) {rec.get('title')}: {rec.get('detail')}")
+    print()
+
+
 def _print_shadow_trading(status: ShadowTradingStatus, path: Path) -> None:
     print(f"=== News Shadow-Trading ({path.name}) ===")
     if status.closed == 0:
@@ -80,13 +125,10 @@ def _print_shadow_trading(status: ShadowTradingStatus, path: Path) -> None:
 
 def _print_news_analysis(status: NewsAnalysisStatus, path: Path) -> None:
     print(f"=== News Analysis ({path.name}) ===")
-    if status.assessed == 0 and status.skipped == 0:
+    if status.assessed == 0:
         print("No articles assessed yet.\n")
         return
-    print(
-        f"Batches assessed: {status.assessed}  Skipped (shadow trade already open): "
-        f"{status.skipped}  Avg confidence: {status.avg_confidence:.2f}"
-    )
+    print(f"Batches assessed: {status.assessed}  Avg confidence: {status.avg_confidence:.2f}")
     print(f"Direction breakdown: {status.direction_counts}\n")
 
 
@@ -105,10 +147,12 @@ async def run() -> None:
     _print_account(account_status)
 
     log_dir = Path(settings.log_dir)
+    _print_live_trades(log_dir / "trades.jsonl")
     shadow_path = log_dir / "shadow_trades.jsonl"
     news_path = log_dir / "news_analysis.jsonl"
     _print_shadow_trading(gather_shadow_trading_status(shadow_path), shadow_path)
     _print_news_analysis(gather_news_analysis_status(news_path), news_path)
+    _print_advisor(log_dir / "advisor_reports.jsonl")
 
 
 def main() -> None:

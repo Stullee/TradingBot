@@ -25,3 +25,19 @@ services:
       # Set this to enable a VNC server (useful the first few times, to watch
       # the login/2FA flow). Leave empty to disable it.
       VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+      # Store the Gateway's own settings (jts.ini + the Global Configuration
+      # XML, which includes the API "Precautions" bypass checkboxes) in the
+      # persisted volume below. Without this, every container recreation
+      # wipes them back to defaults -- confirmed live: the API-precaution
+      # bypasses (required for the bot's directly-routed TGATE orders, which
+      # the Gateway otherwise discards with error 10311/201) reverted after
+      # a `docker compose up -d`, silently re-blocking all EU stock orders.
+      TWS_SETTINGS_PATH: /home/ibgateway/tws_settings
+    volumes:
+      - tws_settings:/home/ibgateway/tws_settings
+
+volumes:
+  # Named volume (docker-managed ownership -- avoids uid mismatches a host
+  # bind mount can hit on Home Assistant OS). Survives restarts, container
+  # recreations, and image updates; only `docker compose down -v` deletes it.
+  tws_settings:

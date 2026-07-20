@@ -37,6 +37,19 @@ Docker access. To run an extra container alongside it:
    ```
 4. Verify it's listening: `ss -tlnp | grep -E '4001|4002'` should show IB
    Gateway bound to `127.0.0.1:4002` (paper) and `127.0.0.1:4001` (live).
+5. **One-time: API precaution bypasses (required for order placement).**
+   The Gateway ships with API "Precautions" that silently *discard* API
+   orders instead of placing them (confirmed live: every directly-routed
+   TGATE order died with error 10311 → 201 "Order was discarded"). Set
+   `VNC_SERVER_PASSWORD` in `.env`, `docker compose up -d`, connect a VNC
+   client to `<host>:5900` (macOS: Finder → Go → Connect to Server →
+   `vnc://<host>:5900`), then in the Gateway: `Configure → Settings → API
+   → Precautions` → tick **every "Bypass ..." checkbox**, Apply/OK. The
+   compose file persists the Gateway's settings in a named Docker volume
+   (`TWS_SETTINGS_PATH`), so this survives restarts, recreations, and
+   image updates — without that volume the checkboxes revert on every
+   `docker compose up -d` (also confirmed live). Only `docker compose
+   down -v` deletes the volume and requires redoing this.
 
 Because the compose file uses `network_mode: host`, IB Gateway's API only
 ever binds to this machine's own loopback interface — it is **never exposed

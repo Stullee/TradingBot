@@ -72,6 +72,11 @@ RESUBSCRIBE_COOLDOWN_SEC = 300
 # event doesn't fire its whole burst in under a second -- same pacing
 # pattern already used for Finnhub polling (see news/monitor.py).
 _RESUBSCRIBE_REQUEST_GAP_SEC = 1.0
+# Crypto entries are marketable LIMIT orders (IB rejects unit-denominated
+# crypto market buys -- see OrderManager.place_bracket), priced this %
+# through the last close so they fill immediately in the normal case while
+# bounding worst-case entry slippage to the same amount.
+CRYPTO_ENTRY_LIMIT_BUFFER_PCT = 0.3
 
 
 def build_strategy(settings: Settings) -> Strategy:
@@ -881,6 +886,10 @@ class TradingEngine:
             stop_price,
             target_price,
         )
+        entry_limit_price = None
+        if spec.security_type == "CRYPTO":
+            buffer = CRYPTO_ENTRY_LIMIT_BUFFER_PCT / 100
+            entry_limit_price = entry_price * (1 + buffer if action == "BUY" else 1 - buffer)
         self.orders.place_bracket(
             contract,
             action,
@@ -889,6 +898,7 @@ class TradingEngine:
             target_price,
             outside_rth=outside_rth,
             meta=meta,
+            entry_limit_price=entry_limit_price,
         )
         self.journal.record_entry_context(
             symbol,

@@ -51,12 +51,14 @@ class FakeBars:
 class FakeOrders:
     def __init__(self):
         self.placed = []
+        self.kwargs = []
 
     def has_pending_entry(self, con_id: int) -> bool:
         return False
 
     def place_bracket(self, contract, action, quantity, stop, target, **kwargs):
         self.placed.append((contract.symbol, action, quantity))
+        self.kwargs.append(kwargs)
         return SimpleNamespace()
 
 
@@ -117,6 +119,10 @@ def test_fx_failure_defers_the_bar_instead_of_dropping_it():
     symbol_placed, action, quantity = engine.orders.placed[0]
     assert (symbol_placed, action) == (symbol, "BUY")
     assert quantity > 0
+    # crypto entries are marketable limits, a small buffer through the
+    # close (IB rejects unit-denominated crypto market buys, error 10289)
+    limit = engine.orders.kwargs[0]["entry_limit_price"]
+    assert limit == 100.0 * 1.003
     # latch advanced -- the bar is consumed after the successful attempt
     assert engine._last_bar_start[symbol] == engine.bars.dataframe(symbol).index[-1]
 
@@ -151,3 +157,5 @@ def test_stock_short_still_places_orders():
     assert len(engine.orders.placed) == 1
     assert engine.orders.placed[0][1] == "SELL"
     assert engine.orders.placed[0][2] > 0
+    # stocks keep plain market entries
+    assert engine.orders.kwargs[0]["entry_limit_price"] is None

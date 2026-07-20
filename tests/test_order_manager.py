@@ -98,6 +98,32 @@ def test_dbk_regression_children_rounded_to_band_tick():
     assert tp.lmtPrice == 30.5
 
 
+def test_entry_limit_price_makes_the_parent_a_limit_order():
+    """The live SOL incident: IB rejects unit-denominated crypto market
+    BUYs (error 10289 'You must set Cash Quantity') -- crypto entries go
+    out as marketable limits in units instead, rounded to tick."""
+    ib = FakeIB()
+    om = OrderManager(ib)
+    om.place_bracket(
+        make_contract(symbol="SOL"), "BUY", 2988.87571185,
+        stop_price=75.91, target_price=76.76,
+        meta=ContractMeta(min_tick=0.01), entry_limit_price=76.4587,
+    )
+    parent = ib.trades[0].order
+    assert parent.orderType == "LMT"
+    assert parent.lmtPrice == 76.46
+    # children unchanged: exact same unit quantity, TP limit + protective stop
+    assert [t.order.orderType for t in ib.trades] == ["LMT", "LMT", "STP"]
+    assert all(t.order.totalQuantity == 2988.87571185 for t in ib.trades)
+
+
+def test_no_entry_limit_price_keeps_a_market_parent():
+    ib = FakeIB()
+    om = OrderManager(ib)
+    om.place_bracket(make_contract(), "BUY", 10, stop_price=98.0, target_price=104.0)
+    assert ib.trades[0].order.orderType == "MKT"
+
+
 def test_stale_pending_entry_is_cancelled():
     """A parent whose children were rejected can sit non-done forever
     (confirmed live), blocking its symbol and occupying a position slot --

@@ -95,10 +95,22 @@ class OrderManager:
         target_price: float,
         outside_rth: bool = False,
         meta: ContractMeta | None = None,
+        entry_limit_price: float | None = None,
     ) -> Trade:
         """action: 'BUY' to go long, 'SELL' to go short. Returns the parent Trade.
         outside_rth must be True for the order to be eligible to trigger/fill
-        outside a market's regular trading hours (e.g. US pre/post-market)."""
+        outside a market's regular trading hours (e.g. US pre/post-market).
+
+        entry_limit_price: when set, the entry is a marketable LIMIT at that
+        price instead of a market order. Used for crypto: IB rejects crypto
+        market BUY orders denominated in units (confirmed live -- error
+        10289 "You must set Cash Quantity for this order"); market buys
+        there must be in fiat cashQty, which would leave the children's
+        unit quantity unknowable until the fill. A limit priced a small
+        buffer through the market fills immediately in the normal case,
+        keeps the exact unit quantity the bracket needs, and bounds entry
+        slippage as a bonus; if price runs away, the order rests until
+        cancel_stale_entries reclaims it."""
         if quantity <= 0:
             raise ValueError("quantity must be positive")
         meta = meta or ContractMeta()
@@ -110,7 +122,12 @@ class OrderManager:
         # account's order presets (e.g. blank TIF -> DAY) instead of just
         # adjusting them, unless "Bypass Order Precautions for API Orders" is
         # enabled in TWS/Gateway's API precaution settings.
-        parent = MarketOrder(action, quantity)
+        if entry_limit_price is not None:
+            parent: MarketOrder | LimitOrder = LimitOrder(
+                action, quantity, round_to_tick(entry_limit_price, meta.tick_for(entry_limit_price))
+            )
+        else:
+            parent = MarketOrder(action, quantity)
         parent.transmit = False
         parent.outsideRth = outside_rth
         parent.tif = "DAY"

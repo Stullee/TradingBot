@@ -43,6 +43,27 @@ def make_contract(con_id=101, symbol="AAPL"):
     return SimpleNamespace(conId=con_id, symbol=symbol)
 
 
+def test_marketable_entry_limits_round_toward_marketability():
+    """Confirmed live: DOGE at ~0.0726 with a coarse 0.01 tick rounded the
+    buy limit DOWN to 0.07 -- below the market, an IOC that can never
+    fill. Buy limits must ceil to tick, sell limits floor."""
+    assert round_to_tick(0.07276, 0.01, mode="up") == 0.08
+    assert round_to_tick(0.07276, 0.01, mode="down") == 0.07
+    # exact multiples stay put in every mode
+    assert round_to_tick(0.08, 0.01, mode="up") == 0.08
+    assert round_to_tick(0.07, 0.01, mode="down") == 0.07
+    assert round_to_tick(76.4587, 0.01, mode="up") == 76.46
+
+    ib = FakeIB()
+    om = OrderManager(ib)
+    om.place_bracket(
+        make_contract(symbol="DOGE"), "BUY", 3134825.0,
+        stop_price=0.0725, target_price=0.0726,
+        meta=ContractMeta(min_tick=0.01), entry_limit_price=0.07276, attach_exits=False,
+    )
+    assert ib.trades[0].order.lmtPrice == 0.08  # above market: fillable, capped
+
+
 def test_round_to_tick_handles_banded_ticks():
     # HKEX band: a HK$380 stock ticks in 0.2 -- blanket 2-decimal rounding
     # produced invalid prices IB rejects.

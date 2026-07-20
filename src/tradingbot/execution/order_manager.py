@@ -12,6 +12,7 @@ prevent (confirmed live: DBK children at 4 decimals, both legs cancelled)."""
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 from ib_async import IB, Contract, LimitOrder, MarketOrder, StopOrder, Trade
@@ -27,12 +28,22 @@ log = logging.getLogger(__name__)
 STALE_ENTRY_MAX_AGE_SEC = 600.0
 
 
-def round_to_tick(price: float, min_tick: float) -> float:
-    """Nearest multiple of `min_tick`, cleaned of binary-float dust so the
-    wire value is exact (IB rejects e.g. 380.20000000000003)."""
+def round_to_tick(price: float, min_tick: float, mode: str = "nearest") -> float:
+    """Multiple of `min_tick`, cleaned of binary-float dust so the wire
+    value is exact (IB rejects e.g. 380.20000000000003). mode "up"/"down"
+    rounds toward that direction -- marketable entry limits must round
+    *toward* marketability (up for BUY, down for SELL): confirmed live, a
+    coarse tick rounded a DOGE buy limit below the market, leaving an IOC
+    order that could never fill."""
     if min_tick <= 0:
         min_tick = 0.01
-    steps = round(price / min_tick)
+    raw_steps = price / min_tick
+    if mode == "up":
+        steps = math.ceil(raw_steps - 1e-9)
+    elif mode == "down":
+        steps = math.floor(raw_steps + 1e-9)
+    else:
+        steps = round(raw_steps)
     text = f"{min_tick:.10f}".rstrip("0")
     decimals = len(text.split(".")[1]) if "." in text else 0
     return round(steps * min_tick, decimals)
@@ -128,7 +139,13 @@ class OrderManager:
             if entry_limit_price is None:
                 raise ValueError("attach_exits=False requires entry_limit_price")
             entry = LimitOrder(
-                action, quantity, round_to_tick(entry_limit_price, meta.tick_for(entry_limit_price))
+                action,
+                quantity,
+                round_to_tick(
+                    entry_limit_price,
+                    meta.tick_for(entry_limit_price),
+                    mode="up" if action == "BUY" else "down",
+                ),
             )
             entry.tif = "IOC"
             entry.outsideRth = outside_rth

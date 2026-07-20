@@ -112,6 +112,7 @@ def test_fx_failure_defers_the_bar_instead_of_dropping_it():
     assert engine.orders.placed == []
     # latch reverted -> the same bar is seen as "new" again next tick
     assert engine._last_bar_start[symbol] is None
+    assert engine.latest_signals[symbol]["gate"] == "waiting for FX rate"
 
     engine.fx = WorkingFx(rate=0.9)
     run(engine._process_symbol(symbol, 100_000.0, 0, False, False))
@@ -137,8 +138,10 @@ def test_crypto_short_signal_is_skipped_not_ordered():
     assert engine.orders.placed == []
     # deliberately skipped, not deferred: the bar is consumed...
     assert engine._last_bar_start[symbol] == engine.bars.dataframe(symbol).index[-1]
-    # ...and the dashboard still shows the SHORT reading it acted on
+    # ...and the dashboard still shows the SHORT reading it acted on,
+    # with the "why idle" gate explaining the skip
     assert engine.latest_signals[symbol]["signal"] == "SHORT"
+    assert engine.latest_signals[symbol]["gate"] == "short unsupported (crypto)"
 
 
 def test_stock_short_still_places_orders():

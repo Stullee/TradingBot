@@ -485,18 +485,27 @@ class TradingEngine:
             if not self._flattened_today[market_name]:
                 self.orders.flatten_contracts([self.contracts[s] for s in symbols])
                 self._flattened_today[market_name] = True
+            for symbol in symbols:
+                self._set_gate(symbol, "flatten window / market closing")
             return
         self._flattened_today[market_name] = False
 
         if not session.is_open():
+            for symbol in symbols:
+                self._set_gate(symbol, "market closed")
             return
 
-        stop_new_entries = session.should_stop_new_entries() or session.in_opening_delay()
+        if session.should_stop_new_entries():
+            entry_gate = "close buffer (no new entries)"
+        elif session.in_opening_delay():
+            entry_gate = f"opening delay (first {self.settings.no_entries_after_open_min}m)"
+        else:
+            entry_gate = None
         outside_rth = BUILTIN_MARKETS[market_name].outside_rth
 
         for symbol in symbols:
             await self._process_symbol(
-                symbol, equity, open_position_count, stop_new_entries, outside_rth
+                symbol, equity, open_position_count, entry_gate, outside_rth
             )
 
     async def _check_stale_bars(self) -> None:
@@ -798,12 +807,19 @@ class TradingEngine:
             "latest_bar_signals": self.latest_signals,
         }
 
+    def _set_gate(self, symbol: str, gate: str) -> None:
+        """Publishes the reason this symbol isn't entering right now ("" =
+        an entry was just placed) into the dashboard's per-symbol row --
+        the 'why aren't we trading' indicator. Values persist between bars,
+        so the row always shows the outcome of the latest decision."""
+        self.latest_signals.setdefault(symbol, {})["gate"] = gate
+
     async def _process_symbol(
         self,
         symbol: str,
         equity: float,
         open_position_count: int,
-        stop_new_entries: bool,
+        entry_gate: str | None,
         outside_rth: bool,
     ) -> None:
         contract = self.contracts[symbol]
@@ -831,6 +847,9 @@ class TradingEngine:
 
         closed = df.iloc[:-1]  # exclude the still-forming last bar
         if len(closed) < self.strategy.min_bars:
+            self._set_gate(
+                symbol, f"warming up ({len(closed)}/{self.strategy.min_bars} bars)"
+            )
             return
 
         enriched = add_indicators(
@@ -846,20 +865,32 @@ class TradingEngine:
         position_qty = self._position_qty(contract)
 
         if position_qty != 0:
+            self._set_gate(symbol, "in position")
             if self.strategy.is_exit_signal(enriched, position_is_long=position_qty > 0):
                 log.info("%s: strategy exit signal, flattening.", symbol)
                 self.orders.flatten_position(contract, position_qty)
             return
 
         if self.orders.has_pending_entry(contract.conId):
+            self._set_gate(symbol, "entry order pending")
             return  # an entry order is already in flight -- don't stack a second one
 
-        if stop_new_entries:
+        if entry_gate:
+            self._set_gate(symbol, entry_gate)
             return
-        if not self.risk.can_open_new_position(
-            open_position_count + self._entries_this_tick,
-            open_risk_pct=sum(self._open_risk_pct.values()),
-        ):
+        count = open_position_count + self._entries_this_tick
+        open_risk_pct = sum(self._open_risk_pct.values())
+        if not self.risk.can_open_new_position(count, open_risk_pct=open_risk_pct):
+            if self.risk.kill_switch_active:
+                gate = "kill switch active"
+            elif count >= self.risk.max_concurrent_positions:
+                gate = f"max positions ({count}/{self.risk.max_concurrent_positions})"
+            else:
+                gate = (
+                    f"portfolio heat cap ({open_risk_pct:.1f}%/"
+                    f"{self.risk.max_open_risk_pct:g}%)"
+                )
+            self._set_gate(symbol, gate)
             return
 
         signal = self.strategy.generate_signal(enriched)
@@ -889,11 +920,23 @@ class TradingEngine:
         if diagnostics_fn is not None:
             self.latest_signals[symbol].update(diagnostics_fn(enriched))
         if signal == Signal.FLAT:
+            session_bars = self.latest_signals[symbol].get("trend_session_bars")
+            if session_bars is not None and session_bars < self.settings.trend_window + 1:
+                # trendline_breakout refuses to fit across the overnight gap
+                # -- show the same-session warmup progress instead of a
+                # generic "no signal".
+                self._set_gate(
+                    symbol,
+                    f"session warmup ({session_bars}/{self.settings.trend_window + 1} bars)",
+                )
+            else:
+                self._set_gate(symbol, "no signal")
             return
         if signal == Signal.SHORT and spec.security_type == "CRYPTO":
             # IB has no spot-crypto shorting -- the order would only come
             # back rejected (confirmed live: XRP SHORT signal on a Sunday).
             log.info("%s: SHORT signal skipped -- IB does not support shorting spot crypto.", symbol)
+            self._set_gate(symbol, "short unsupported (crypto)")
             return
 
         entry_price = float(last["close"])
@@ -932,6 +975,7 @@ class TradingEngine:
                 exc,
             )
             self._last_bar_start[symbol] = last_seen
+            self._set_gate(symbol, "waiting for FX rate")
             return
         meta = self.contract_meta.get(symbol, ContractMeta())
         if spec.security_type == "CRYPTO":
@@ -955,6 +999,7 @@ class TradingEngine:
         )
         if quantity <= 0:
             log.info("%s: signal %s but computed position size is 0, skipping.", symbol, signal)
+            self._set_gate(symbol, "size 0 (risk budget vs price/stop)")
             return
 
         log.info(
@@ -998,3 +1043,4 @@ class TradingEngine:
         if equity_local > 0:
             self._open_risk_pct[symbol] = quantity * stop_dist / equity_local * 100.0
         self._entries_this_tick += 1
+        self._set_gate(symbol, "")  # entered -- nothing blocking

@@ -61,6 +61,16 @@ def add_indicators(
     out["rsi"] = rsi(out["close"], rsi_period)
     out["atr"] = atr(out, atr_period)
     out["vwap"] = session_vwap(out, vwap_tz)
+    # Which trading session (calendar date in the market's own timezone)
+    # each bar belongs to -- the same grouping VWAP resets on. Lets
+    # strategies confine themselves to the current session: an intraday
+    # trendline fitted across the overnight/weekend gap is geometrically
+    # meaningless (confirmed live: VOW3's Monday-morning uptrend was
+    # invisible for hours because the fit window still contained Friday's
+    # bars plus the weekend gap-down).
+    out["session_date"] = (
+        out.index.tz_convert(vwap_tz).date if out.index.tz is not None else out.index.date
+    )
     # A longer-horizon trend reference, independent of ema_fast/ema_slow
     # (which are tuned for short-term crossover signals). Used by
     # VwapMeanReversion as a trend filter -- see that class's docstring.

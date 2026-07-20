@@ -93,6 +93,7 @@ function renderSymbols(symbols) {
     var posText = s.position_qty ? fmt(s.position_qty, 0) +
       (s.unrealized_pnl !== null ? " (" + fmt(s.unrealized_pnl) + ")" : "") : "-";
     var row = "<tr><td>" + s.symbol + "</td><td>" + posText + "</td><td>" + badge(s.bar_signal) +
+      "</td><td style='opacity:0.75'>" + (s.gate ? s.gate : "-") +
       "</td><td>" + (s.rsi !== null && s.rsi !== undefined ? fmt(s.rsi, 0) : "-") + "</td>";
     if (hasTrend) {
       var hasFit = s.trend_r_squared !== null && s.trend_r_squared !== undefined;
@@ -107,7 +108,7 @@ function renderSymbols(symbols) {
       "</td></tr>";
     return row;
   }).join("");
-  var head = "<tr><th>Symbol</th><th>Position (unreal. P&amp;L)</th><th>Bar Signal</th><th>RSI</th>";
+  var head = "<tr><th>Symbol</th><th>Position (unreal. P&amp;L)</th><th>Bar Signal</th><th>Why idle</th><th>RSI</th>";
   if (hasTrend) {
     head += "<th>Slope</th><th>Trend R&sup2;</th><th>Dist. from Line</th>";
   }
@@ -347,9 +348,12 @@ async def _status_payload(
                 "symbol": symbol,
                 "position_qty": pos.quantity if pos else 0,
                 "unrealized_pnl": pos.unrealized_pnl if pos else None,
-                "bar_signal": sig["signal"] if sig else None,
-                "bar_signal_updated_at": sig["updated_at"] if sig else None,
-                "rsi": sig["rsi"] if sig else None,
+                "bar_signal": sig.get("signal") if sig else None,
+                "bar_signal_updated_at": sig.get("updated_at") if sig else None,
+                # Why this symbol isn't entering right now ("" = just
+                # entered) -- the dashboard's "why aren't we trading" column.
+                "gate": sig.get("gate") if sig else None,
+                "rsi": sig.get("rsi") if sig else None,
                 # Only populated when the active strategy exposes a
                 # diagnostics() method (currently trendline_breakout) --
                 # None/absent for the others, rendered as "-" on the

@@ -93,3 +93,53 @@ def test_diagnostics_empty_without_enough_bars():
     strat = make_strategy()
     df = df_from(_TIGHT_RISE_THEN_BREAKOUT)
     assert strat.diagnostics(df.iloc[: strat.min_bars - 1]) == {}
+
+
+# --- session scoping (the VOW3 weekend-gap lesson) -------------------------
+
+def df_with_sessions(closes_by_day: list[list[float]]) -> pd.DataFrame:
+    frames = []
+    for i, day_closes in enumerate(closes_by_day):
+        idx = pd.date_range(f"2024-01-{i + 2:02d} 09:30", periods=len(day_closes), freq="5min", tz="UTC")
+        frame = pd.DataFrame({"close": day_closes}, index=idx)
+        frame["session_date"] = idx[0].date()
+        frames.append(frame)
+    return pd.concat(frames)
+
+
+def test_fit_uses_only_the_current_session():
+    """Confirmed live (VOW3, Monday 2026-07-20): a weekend gap-down plus
+    Friday's bars in the window made a clean Monday uptrend read as 'no
+    valid trend' for hours. With session scoping, the young session simply
+    waits; without it, the gap-polluted fit reports a falling line."""
+    strat = make_strategy()
+    friday = [110.0, 109.5, 109.0, 108.5, 108.0]  # drifting down into the weekend
+    monday_early = [100.0, 100.5, 101.0]  # gap down, then a clean rise begins
+    df = df_with_sessions([friday, monday_early])
+
+    # Session-scoped: too few Monday bars for a fit -> patient FLAT, and
+    # diagnostics show the warmup progress instead of a bogus fit.
+    assert strat.generate_signal(df) == Signal.FLAT
+    assert strat.diagnostics(df) == {"trend_session_bars": 3}
+
+    # Without session info the window spans the gap: the "trend" is the
+    # gap-down, slope negative -- the exact pollution being prevented.
+    polluted = strat.diagnostics(df.drop(columns=["session_date"]))
+    assert polluted["trend_slope"] < 0
+
+
+def test_signal_fires_once_the_session_has_enough_bars():
+    strat = make_strategy()
+    friday = [110.0, 109.5, 109.0, 108.5, 108.0]
+    monday = [100.0, 100.5, 101.0, 101.5, 102.0, 105.0]  # 6 bars = window+1
+    df = df_with_sessions([friday, monday])
+    assert strat.generate_signal(df) == Signal.LONG
+    diagnostics = strat.diagnostics(df)
+    assert diagnostics["trend_session_bars"] == 6
+    assert diagnostics["trend_slope"] > 0
+
+
+def test_exit_defers_to_bracket_when_session_too_young():
+    strat = make_strategy()
+    df = df_with_sessions([[110.0, 109.5, 109.0, 108.5, 108.0], [100.0, 99.0]])
+    assert strat.is_exit_signal(df, position_is_long=True) is False

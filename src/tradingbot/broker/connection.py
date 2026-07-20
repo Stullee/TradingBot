@@ -228,13 +228,21 @@ class BrokerConnection:
 
         min_tick = _positive(d.minTick) or 0.01
         increments = await self._price_increments(contract, d)
-        if not increments and getattr(contract, "secType", "") == "STK":
+        sec_type = getattr(contract, "secType", "")
+        if not increments and sec_type == "STK":
             # No band info and minTick is only the smallest *theoretical*
             # tick (see class docstring) -- a one-cent floor is valid for
             # every stock in this bot's universe and prevents the sub-tick
             # rejections seen live, at the cost of sub-$1/EUR1 penny-stock
             # precision this bot doesn't trade anyway.
             min_tick = max(min_tick, 0.01)
+        elif not increments and sec_type == "CRYPTO":
+            # Confirmed live: with no band data, the 0.01 default collapsed
+            # DOGE's (price ~$0.07) stop and target to the same rounded
+            # price. 1e-5 keeps sub-dollar coins meaningful and still
+            # conforms for the majors (any 2-decimal ETH/BTC price is a
+            # 1e-5 multiple).
+            min_tick = 1e-5
 
         return ContractMeta(
             min_tick=min_tick,

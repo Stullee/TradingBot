@@ -96,7 +96,7 @@ class OrderManager:
         outside_rth: bool = False,
         meta: ContractMeta | None = None,
         entry_limit_price: float | None = None,
-        native_stop: bool = True,
+        attach_exits: bool = True,
     ) -> Trade:
         """action: 'BUY' to go long, 'SELL' to go short. Returns the parent Trade.
         outside_rth must be True for the order to be eligible to trigger/fill
@@ -106,23 +106,47 @@ class OrderManager:
         price instead of a market order. Used for crypto: IB rejects crypto
         market BUY orders denominated in units (confirmed live -- error
         10289 "You must set Cash Quantity for this order"); market buys
-        there must be in fiat cashQty, which would leave the children's
-        unit quantity unknowable until the fill. A limit priced a small
-        buffer through the market fills immediately in the normal case,
-        keeps the exact unit quantity the bracket needs, and bounds entry
-        slippage as a bonus; if price runs away, the order rests until
-        cancel_stale_entries reclaims it.
+        there must be in fiat cashQty, which would leave the exit orders'
+        unit quantity unknowable until the fill.
 
-        native_stop=False places only the entry + take-profit legs -- for
-        venues that reject stop orders outright (confirmed live: error 387
-        "Unsupported order type for this exchange and security type" on the
-        ZeroHash crypto stop child, which cancelled the whole chain). The
-        protective stop is then engine-managed: the engine watches the
-        price and flattens when the recorded stop level is crossed (see
-        engine._check_synthetic_crypto_stops)."""
+        attach_exits=False places ONLY the entry, as an IOC marketable
+        limit, with no child orders at all -- the full ZeroHash crypto rule
+        set, every line confirmed live: stop orders are unsupported (error
+        387), buy orders must be TIF "Minutes or IOC" (error 201), and
+        "This instrument doesn't support child/hedge orders" (error 201),
+        so even a take-profit cannot be attached. IOC means the entry
+        either fills immediately against the touch or cancels itself --
+        no resting entry, nothing for cancel_stale_entries to reclaim.
+        Exits are then engine-managed (engine._manage_crypto_exits): a
+        standalone take-profit is placed once the position exists, and the
+        stop is enforced in software."""
         if quantity <= 0:
             raise ValueError("quantity must be positive")
         meta = meta or ContractMeta()
+
+        if not attach_exits:
+            if entry_limit_price is None:
+                raise ValueError("attach_exits=False requires entry_limit_price")
+            entry = LimitOrder(
+                action, quantity, round_to_tick(entry_limit_price, meta.tick_for(entry_limit_price))
+            )
+            entry.tif = "IOC"
+            entry.outsideRth = outside_rth
+            entry.transmit = True
+            entry_trade = self.ib.placeOrder(contract, entry)
+            self._entry_trades[contract.conId] = entry_trade
+            self._entry_placed_at[contract.conId] = time.monotonic()
+            log.info(
+                "Entry (IOC limit) placed: %s %s x%s @ %.6f -- stop %.6f and target %.6f "
+                "are engine-managed on this venue.",
+                action,
+                contract.symbol,
+                quantity,
+                entry.lmtPrice,
+                stop_price,
+                target_price,
+            )
+            return entry_trade
 
         exit_action = "SELL" if action == "BUY" else "BUY"
 
@@ -144,40 +168,78 @@ class OrderManager:
         take_profit = LimitOrder(
             exit_action, quantity, round_to_tick(target_price, meta.tick_for(target_price))
         )
-        # The last order placed in the chain carries transmit=True.
-        take_profit.transmit = not native_stop
+        take_profit.transmit = False
         take_profit.outsideRth = outside_rth
         take_profit.tif = "DAY"
+
+        stop_loss = StopOrder(
+            exit_action, quantity, round_to_tick(stop_price, meta.tick_for(stop_price))
+        )
+        stop_loss.transmit = True
+        stop_loss.outsideRth = outside_rth
+        stop_loss.tif = "DAY"
 
         parent_trade = self.ib.placeOrder(contract, parent)
         parent.orderId = parent_trade.order.orderId
         take_profit.parentId = parent.orderId
-        rounded_stop = round_to_tick(stop_price, meta.tick_for(stop_price))
+        stop_loss.parentId = parent.orderId
 
-        if native_stop:
-            stop_loss = StopOrder(exit_action, quantity, rounded_stop)
-            stop_loss.transmit = True
-            stop_loss.outsideRth = outside_rth
-            stop_loss.tif = "DAY"
-            stop_loss.parentId = parent.orderId
-            self.ib.placeOrder(contract, take_profit)
-            self.ib.placeOrder(contract, stop_loss)
-        else:
-            self.ib.placeOrder(contract, take_profit)
+        self.ib.placeOrder(contract, take_profit)
+        self.ib.placeOrder(contract, stop_loss)
 
         self._entry_trades[contract.conId] = parent_trade
         self._entry_placed_at[contract.conId] = time.monotonic()
 
         log.info(
-            "Bracket order placed: %s %s x%s, stop=%.4f%s, target=%.4f",
+            "Bracket order placed: %s %s x%s, stop=%.4f, target=%.4f",
             action,
             contract.symbol,
             quantity,
-            rounded_stop,
-            "" if native_stop else " (engine-managed)",
+            stop_loss.auxPrice,
             take_profit.lmtPrice,
         )
         return parent_trade
+
+    def place_standalone_take_profit(
+        self,
+        contract: Contract,
+        position_qty: float,
+        target_price: float,
+        meta: ContractMeta | None = None,
+    ) -> Trade:
+        """A plain (non-child) limit order closing the position at the
+        target -- for venues that don't support attached orders (ZeroHash).
+        Placed by the engine once the position actually exists, sized to
+        the real filled quantity."""
+        meta = meta or ContractMeta()
+        action = "SELL" if position_qty > 0 else "BUY"
+        order = LimitOrder(
+            action, abs(position_qty), round_to_tick(target_price, meta.tick_for(target_price))
+        )
+        order.tif = "DAY"
+        trade = self.ib.placeOrder(contract, order)
+        log.info(
+            "Standalone take-profit placed: %s %s x%s @ %.6f",
+            action,
+            contract.symbol,
+            abs(position_qty),
+            order.lmtPrice,
+        )
+        return trade
+
+    def has_live_take_profit(self, contract: Contract, position_qty: float) -> bool:
+        """True if a live limit order that closes (part of) this position
+        is resting."""
+        closing_action = "SELL" if position_qty > 0 else "BUY"
+        for t in self.ib.openTrades():
+            if (
+                t.contract.conId == contract.conId
+                and not t.isDone()
+                and t.order.orderType == "LMT"
+                and t.order.action == closing_action
+            ):
+                return True
+        return False
 
     def has_live_protective_stop(self, contract: Contract, position_qty: float) -> bool:
         """True if a live stop order exists that closes (part of) this

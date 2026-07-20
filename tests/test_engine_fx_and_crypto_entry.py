@@ -123,8 +123,8 @@ def test_fx_failure_defers_the_bar_instead_of_dropping_it():
     # close (IB rejects unit-denominated crypto market buys, error 10289)
     limit = engine.orders.kwargs[0]["entry_limit_price"]
     assert limit == 100.0 * 1.003
-    # ...and without a native stop leg (ZeroHash rejects STP, error 387)
-    assert engine.orders.kwargs[0]["native_stop"] is False
+    # ...bare, with engine-managed exits (ZeroHash: no stops, no children)
+    assert engine.orders.kwargs[0]["attach_exits"] is False
     # latch advanced -- the bar is consumed after the successful attempt
     assert engine._last_bar_start[symbol] == engine.bars.dataframe(symbol).index[-1]
 
@@ -159,34 +159,51 @@ def test_stock_short_still_places_orders():
     assert len(engine.orders.placed) == 1
     assert engine.orders.placed[0][1] == "SELL"
     assert engine.orders.placed[0][2] > 0
-    # stocks keep plain market entries with a native exchange-side stop
+    # stocks keep plain market entries with a full native bracket
     assert engine.orders.kwargs[0]["entry_limit_price"] is None
-    assert engine.orders.kwargs[0]["native_stop"] is True
+    assert engine.orders.kwargs[0]["attach_exits"] is True
 
 
-def test_synthetic_crypto_stop_flattens_when_crossed():
-    """ZeroHash has no native stops -- the engine must flatten a crypto
-    position itself once price crosses the recorded stop level."""
+def make_crypto_position_engine(stop: float, target: float | None):
     engine, symbol = make_engine(Signal.FLAT)
     contract = engine.contracts[symbol]
     engine.broker.ib.positions = lambda: [
         SimpleNamespace(contract=SimpleNamespace(conId=contract.conId), position=121.8)
     ]
-    flattened = []
     engine.orders.has_pending_close = lambda c, q: False
-    engine.orders.flatten_position = lambda c, q: flattened.append((c.symbol, q))
+    engine.orders.has_live_take_profit = lambda c, q: False
+    engine.orders.flattened = []
+    engine.orders.take_profits = []
+    engine.orders.flatten_position = lambda c, q: engine.orders.flattened.append((c.symbol, q))
+    engine.orders.place_standalone_take_profit = (
+        lambda c, q, t, meta=None: engine.orders.take_profits.append((c.symbol, q, t))
+    )
+    engine.journal = SimpleNamespace(
+        stop_price_for=lambda s: stop,
+        target_price_for=lambda s: target,
+        record_entry_context=lambda *a, **kw: None,
+    )
+    return engine, symbol
 
+
+def test_crypto_exit_manager_flattens_when_stop_crossed():
+    """ZeroHash has no native stops -- the engine must flatten a crypto
+    position itself once price crosses the recorded stop level."""
     # last close in make_df is 100.0; stop above it -> hit for a long
-    engine.journal = SimpleNamespace(
-        stop_price_for=lambda s: 101.0, record_entry_context=lambda *a, **kw: None
-    )
-    engine._check_synthetic_crypto_stops()
-    assert flattened == [(symbol, 121.8)]
+    engine, symbol = make_crypto_position_engine(stop=101.0, target=105.0)
+    engine._manage_crypto_exits()
+    assert engine.orders.flattened == [(symbol, 121.8)]
+    assert engine.orders.take_profits == []  # stopped out, no TP placed
 
-    # stop safely below the price -> untouched
-    flattened.clear()
-    engine.journal = SimpleNamespace(
-        stop_price_for=lambda s: 99.0, record_entry_context=lambda *a, **kw: None
-    )
-    engine._check_synthetic_crypto_stops()
-    assert flattened == []
+
+def test_crypto_exit_manager_places_standalone_take_profit():
+    """ZeroHash rejects attached children -- the TP is placed standalone
+    once the position exists, sized to the real quantity."""
+    engine, symbol = make_crypto_position_engine(stop=99.0, target=105.0)
+    engine._manage_crypto_exits()
+    assert engine.orders.flattened == []
+    assert engine.orders.take_profits == [(symbol, 121.8, 105.0)]
+    # a recovered context (target 0) never places a TP
+    engine2, _ = make_crypto_position_engine(stop=99.0, target=0.0)
+    engine2._manage_crypto_exits()
+    assert engine2.orders.take_profits == []

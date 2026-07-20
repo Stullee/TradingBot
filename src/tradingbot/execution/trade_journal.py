@@ -138,6 +138,13 @@ class TradeJournal:
         ctx = self._contexts.get(symbol)
         return ctx.stop_price if ctx else None
 
+    def target_price_for(self, symbol: str) -> float | None:
+        """The intended take-profit level -- used by the engine-managed
+        crypto exits to place a standalone TP once the position exists.
+        <= 0 means "no meaningful target" (e.g. a recovered context)."""
+        ctx = self._contexts.get(symbol)
+        return ctx.target_price if ctx else None
+
     # --- persistence -------------------------------------------------------
     def _load_contexts(self) -> dict[str, EntryContext]:
         if not self.context_path.exists():

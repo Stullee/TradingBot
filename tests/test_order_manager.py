@@ -117,22 +117,40 @@ def test_entry_limit_price_makes_the_parent_a_limit_order():
     assert all(t.order.totalQuantity == 2988.87571185 for t in ib.trades)
 
 
-def test_native_stop_false_places_only_entry_and_take_profit():
-    """The live ETH incident: ZeroHash rejected the STP child with error
-    387, cancelling the whole chain. Crypto brackets now carry only entry +
-    take-profit; the stop is engine-managed."""
+def test_attach_exits_false_places_a_bare_ioc_entry_only():
+    """The full ZeroHash rule set, confirmed live across three rejections:
+    no stop orders (387), no child/hedge orders (201), and buys must be
+    IOC/Minutes (201). The crypto entry goes out alone, as an IOC limit;
+    both exits are engine-managed afterwards."""
     ib = FakeIB()
     om = OrderManager(ib)
     om.place_bracket(
-        make_contract(symbol="ETH"), "BUY", 121.82922826,
-        stop_price=1864.10, target_price=1875.65,
-        meta=ContractMeta(min_tick=0.01), entry_limit_price=1874.05, native_stop=False,
+        make_contract(symbol="DOGE"), "BUY", 3155592.43213115,
+        stop_price=0.0693, target_price=0.0705,
+        meta=ContractMeta(min_tick=1e-5), entry_limit_price=0.07001, attach_exits=False,
     )
-    types = [t.order.orderType for t in ib.trades]
-    assert types == ["LMT", "LMT"]  # marketable-limit entry + TP, no STP leg
-    take_profit = ib.trades[1].order
-    assert take_profit.transmit is True  # TP now carries the chain's transmit
-    assert take_profit.parentId == ib.trades[0].order.orderId
+    assert len(ib.trades) == 1  # entry only -- no children of any kind
+    entry = ib.trades[0].order
+    assert entry.orderType == "LMT"
+    assert entry.tif == "IOC"
+    assert entry.transmit is True
+    assert entry.lmtPrice == 0.07001  # 1e-5 tick keeps sub-dollar precision
+    assert om.has_pending_entry(make_contract(symbol="DOGE").conId) is True
+
+
+def test_standalone_take_profit_is_a_plain_non_child_limit():
+    ib = FakeIB()
+    om = OrderManager(ib)
+    contract = make_contract(symbol="DOGE", con_id=12)
+    om.place_standalone_take_profit(
+        contract, position_qty=3155592.0, target_price=0.0705, meta=ContractMeta(min_tick=1e-5)
+    )
+    order = ib.trades[0].order
+    assert order.orderType == "LMT"
+    assert order.action == "SELL"
+    assert order.lmtPrice == 0.0705
+    assert not getattr(order, "parentId", 0)  # standalone: no parent linkage
+    assert om.has_live_take_profit(contract, 3155592.0) is True
 
 
 def test_no_entry_limit_price_keeps_a_market_parent():

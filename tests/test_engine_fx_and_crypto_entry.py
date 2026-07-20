@@ -123,6 +123,8 @@ def test_fx_failure_defers_the_bar_instead_of_dropping_it():
     # close (IB rejects unit-denominated crypto market buys, error 10289)
     limit = engine.orders.kwargs[0]["entry_limit_price"]
     assert limit == 100.0 * 1.003
+    # ...and without a native stop leg (ZeroHash rejects STP, error 387)
+    assert engine.orders.kwargs[0]["native_stop"] is False
     # latch advanced -- the bar is consumed after the successful attempt
     assert engine._last_bar_start[symbol] == engine.bars.dataframe(symbol).index[-1]
 
@@ -157,5 +159,34 @@ def test_stock_short_still_places_orders():
     assert len(engine.orders.placed) == 1
     assert engine.orders.placed[0][1] == "SELL"
     assert engine.orders.placed[0][2] > 0
-    # stocks keep plain market entries
+    # stocks keep plain market entries with a native exchange-side stop
     assert engine.orders.kwargs[0]["entry_limit_price"] is None
+    assert engine.orders.kwargs[0]["native_stop"] is True
+
+
+def test_synthetic_crypto_stop_flattens_when_crossed():
+    """ZeroHash has no native stops -- the engine must flatten a crypto
+    position itself once price crosses the recorded stop level."""
+    engine, symbol = make_engine(Signal.FLAT)
+    contract = engine.contracts[symbol]
+    engine.broker.ib.positions = lambda: [
+        SimpleNamespace(contract=SimpleNamespace(conId=contract.conId), position=121.8)
+    ]
+    flattened = []
+    engine.orders.has_pending_close = lambda c, q: False
+    engine.orders.flatten_position = lambda c, q: flattened.append((c.symbol, q))
+
+    # last close in make_df is 100.0; stop above it -> hit for a long
+    engine.journal = SimpleNamespace(
+        stop_price_for=lambda s: 101.0, record_entry_context=lambda *a, **kw: None
+    )
+    engine._check_synthetic_crypto_stops()
+    assert flattened == [(symbol, 121.8)]
+
+    # stop safely below the price -> untouched
+    flattened.clear()
+    engine.journal = SimpleNamespace(
+        stop_price_for=lambda s: 99.0, record_entry_context=lambda *a, **kw: None
+    )
+    engine._check_synthetic_crypto_stops()
+    assert flattened == []

@@ -117,6 +117,24 @@ def test_entry_limit_price_makes_the_parent_a_limit_order():
     assert all(t.order.totalQuantity == 2988.87571185 for t in ib.trades)
 
 
+def test_native_stop_false_places_only_entry_and_take_profit():
+    """The live ETH incident: ZeroHash rejected the STP child with error
+    387, cancelling the whole chain. Crypto brackets now carry only entry +
+    take-profit; the stop is engine-managed."""
+    ib = FakeIB()
+    om = OrderManager(ib)
+    om.place_bracket(
+        make_contract(symbol="ETH"), "BUY", 121.82922826,
+        stop_price=1864.10, target_price=1875.65,
+        meta=ContractMeta(min_tick=0.01), entry_limit_price=1874.05, native_stop=False,
+    )
+    types = [t.order.orderType for t in ib.trades]
+    assert types == ["LMT", "LMT"]  # marketable-limit entry + TP, no STP leg
+    take_profit = ib.trades[1].order
+    assert take_profit.transmit is True  # TP now carries the chain's transmit
+    assert take_profit.parentId == ib.trades[0].order.orderId
+
+
 def test_no_entry_limit_price_keeps_a_market_parent():
     ib = FakeIB()
     om = OrderManager(ib)

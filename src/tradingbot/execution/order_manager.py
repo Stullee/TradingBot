@@ -96,6 +96,7 @@ class OrderManager:
         outside_rth: bool = False,
         meta: ContractMeta | None = None,
         entry_limit_price: float | None = None,
+        native_stop: bool = True,
     ) -> Trade:
         """action: 'BUY' to go long, 'SELL' to go short. Returns the parent Trade.
         outside_rth must be True for the order to be eligible to trigger/fill
@@ -110,7 +111,15 @@ class OrderManager:
         buffer through the market fills immediately in the normal case,
         keeps the exact unit quantity the bracket needs, and bounds entry
         slippage as a bonus; if price runs away, the order rests until
-        cancel_stale_entries reclaims it."""
+        cancel_stale_entries reclaims it.
+
+        native_stop=False places only the entry + take-profit legs -- for
+        venues that reject stop orders outright (confirmed live: error 387
+        "Unsupported order type for this exchange and security type" on the
+        ZeroHash crypto stop child, which cancelled the whole chain). The
+        protective stop is then engine-managed: the engine watches the
+        price and flattens when the recorded stop level is crossed (see
+        engine._check_synthetic_crypto_stops)."""
         if quantity <= 0:
             raise ValueError("quantity must be positive")
         meta = meta or ContractMeta()
@@ -135,35 +144,37 @@ class OrderManager:
         take_profit = LimitOrder(
             exit_action, quantity, round_to_tick(target_price, meta.tick_for(target_price))
         )
-        take_profit.transmit = False
+        # The last order placed in the chain carries transmit=True.
+        take_profit.transmit = not native_stop
         take_profit.outsideRth = outside_rth
         take_profit.tif = "DAY"
 
-        stop_loss = StopOrder(
-            exit_action, quantity, round_to_tick(stop_price, meta.tick_for(stop_price))
-        )
-        stop_loss.transmit = True
-        stop_loss.outsideRth = outside_rth
-        stop_loss.tif = "DAY"
-
         parent_trade = self.ib.placeOrder(contract, parent)
         parent.orderId = parent_trade.order.orderId
-
         take_profit.parentId = parent.orderId
-        stop_loss.parentId = parent.orderId
+        rounded_stop = round_to_tick(stop_price, meta.tick_for(stop_price))
 
-        self.ib.placeOrder(contract, take_profit)
-        self.ib.placeOrder(contract, stop_loss)
+        if native_stop:
+            stop_loss = StopOrder(exit_action, quantity, rounded_stop)
+            stop_loss.transmit = True
+            stop_loss.outsideRth = outside_rth
+            stop_loss.tif = "DAY"
+            stop_loss.parentId = parent.orderId
+            self.ib.placeOrder(contract, take_profit)
+            self.ib.placeOrder(contract, stop_loss)
+        else:
+            self.ib.placeOrder(contract, take_profit)
 
         self._entry_trades[contract.conId] = parent_trade
         self._entry_placed_at[contract.conId] = time.monotonic()
 
         log.info(
-            "Bracket order placed: %s %s x%s, stop=%.4f, target=%.4f",
+            "Bracket order placed: %s %s x%s, stop=%.4f%s, target=%.4f",
             action,
             contract.symbol,
             quantity,
-            stop_loss.auxPrice,
+            rounded_stop,
+            "" if native_stop else " (engine-managed)",
             take_profit.lmtPrice,
         )
         return parent_trade

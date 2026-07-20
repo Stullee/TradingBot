@@ -450,6 +450,8 @@ class TradingEngine:
             self._ensure_protective_stops()
             self.orders.cancel_stale_entries()
 
+        self._check_synthetic_crypto_stops()
+
         # Pending (placed but unfilled) entries count as occupied position
         # slots; their risk stays counted until the position is flat again.
         pending_conids = self.orders.pending_entry_conids()
@@ -589,6 +591,11 @@ class TradingEngine:
             if qty == 0:
                 continue
             spec = self.spec_by_symbol.get(symbol)
+            if spec is not None and spec.security_type == "CRYPTO":
+                # ZeroHash rejects stop orders (387) -- re-attaching one
+                # here would just error-loop. Crypto positions are guarded
+                # by _check_synthetic_crypto_stops instead.
+                continue
             session = self.market_sessions.get(spec.market) if spec else None
             if session is None or not session.is_open():
                 continue  # a stop can't trigger while the market is closed; rechecked at open
@@ -619,6 +626,61 @@ class TradingEngine:
                 f"Re-attached a protective stop @ {stop_price:.4f} to the open "
                 f"{symbol} position ({qty:+g}). Check how its original stop disappeared.",
             )
+
+    def _check_synthetic_crypto_stops(self) -> None:
+        """Software-side stop-loss for crypto positions: ZeroHash rejects
+        native stop orders (error 387, confirmed live -- the whole bracket
+        chain died on the stop child), so crypto brackets carry only the
+        take-profit leg and the engine enforces the stop here, every tick.
+        Reaction granularity is the crypto bar-polling interval (~60s) --
+        coarser than an exchange-side stop, the honest price of the venue
+        not supporting them. The stop level is the entry's recorded intent
+        (trade journal context, persisted across restarts); a position
+        found without one gets an ATR-based level recorded once."""
+        for symbol, contract in self.contracts.items():
+            spec = self.spec_by_symbol.get(symbol)
+            if spec is None or spec.security_type != "CRYPTO":
+                continue
+            qty = self._position_qty(contract)
+            if qty == 0:
+                continue
+            df = self.bars.dataframe(symbol)
+            if df is None or df.empty:
+                continue
+            last_price = float(df["close"].iloc[-1])
+
+            stop_level = self.journal.stop_price_for(symbol)
+            if stop_level is None:
+                stop_level = self._atr_fallback_stop(symbol, qty)
+                if stop_level is None:
+                    continue
+                # Record it so the level is fixed (not re-derived from a
+                # moving price, which would trail and never trigger) and
+                # survives restarts like any other entry context.
+                self.journal.record_entry_context(
+                    symbol,
+                    direction="LONG" if qty > 0 else "SHORT",
+                    entry_ref_price=last_price,
+                    stop_price=stop_level,
+                    target_price=last_price,
+                    strategy="recovered",
+                )
+                log.warning(
+                    "%s: crypto position had no recorded stop -- fixed a synthetic "
+                    "stop at %.4f (ATR-based from current price).",
+                    symbol,
+                    stop_level,
+                )
+
+            hit = last_price <= stop_level if qty > 0 else last_price >= stop_level
+            if hit and not self.orders.has_pending_close(contract, qty):
+                log.warning(
+                    "%s: synthetic crypto stop hit (last=%.4f vs stop=%.4f) -- flattening.",
+                    symbol,
+                    last_price,
+                    stop_level,
+                )
+                self.orders.flatten_position(contract, qty)
 
     def _atr_fallback_stop(self, symbol: str, position_qty: float) -> float | None:
         """Stop level one configured ATR-multiple away from the latest close
@@ -899,6 +961,10 @@ class TradingEngine:
             outside_rth=outside_rth,
             meta=meta,
             entry_limit_price=entry_limit_price,
+            # ZeroHash rejects stop orders (error 387, confirmed live) --
+            # crypto stops are engine-managed instead, see
+            # _check_synthetic_crypto_stops.
+            native_stop=spec.security_type != "CRYPTO",
         )
         self.journal.record_entry_context(
             symbol,

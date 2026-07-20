@@ -104,6 +104,20 @@ class MarketSession:
         cutoff = self._at(now, close_t) - timedelta(minutes=self.flatten_before_close_min)
         return now >= cutoff
 
+    def today_open(self, now: datetime | None = None) -> datetime | None:
+        """Today's session open as an aware datetime -- None for always-open
+        markets or days with no session (weekend/holiday). Used by the
+        stale-bar checker to measure data age from the session open rather
+        than from the previous session's last bar: Friday's bars are not
+        "stale" one minute into Monday's open."""
+        if self.always_open:
+            return None
+        now = now or self.now_local()
+        window = self._window(now)
+        if window is None or window[0] is None:
+            return None
+        return self._at(now, window[0])
+
     def in_opening_delay(self, now: datetime | None = None) -> bool:
         """True during the first entry_delay_after_open_min minutes of the
         session -- the opening auction/first bars, where spreads are widest

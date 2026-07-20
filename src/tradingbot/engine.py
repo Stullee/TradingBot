@@ -541,9 +541,22 @@ class TradingEngine:
                 continue
 
             latest = self.bars.latest_bar_time(symbol)
-            if latest is None:
+            # Age is measured from the later of the last bar and TODAY'S
+            # session open: bars from the previous session aren't "stale"
+            # minutes into a new one (confirmed live: a 22-symbol
+            # resubscribe burst at the Monday US open blew IB's pacing
+            # budget and wiped Friday's bars with empty responses). An
+            # empty live subscription (latest is None) ages from the open
+            # too -- that's the recovery path for exactly that wipe, which
+            # previously had none.
+            reference = latest
+            open_dt = session.today_open()
+            if open_dt is not None:
+                open_utc = open_dt.astimezone(timezone.utc)
+                reference = max(latest, open_utc) if latest is not None else open_utc
+            if reference is None:
                 continue
-            age_sec = (now - latest).total_seconds()
+            age_sec = (now - reference).total_seconds()
             if age_sec <= threshold_sec:
                 continue
             stale_symbols.append((symbol, age_sec))

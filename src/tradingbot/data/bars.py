@@ -7,13 +7,52 @@ live updates"), so crypto symbols use this mode with periodic refresh calls
 from the engine instead."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections import deque
 from datetime import datetime
 
 import pandas as pd
 from ib_async import IB, Contract
 
 log = logging.getLogger(__name__)
+
+
+class _HistoricalRequestPacer:
+    """Keeps ALL of this stream's historical-data requests inside IB's
+    pacing budget (~60 per rolling 10 minutes per connection), with margin.
+
+    Confirmed live (Monday US open): two quick restarts (~40 startup
+    subscribes each) plus a 22-symbol resubscribe burst exhausted the
+    budget; the paced-out requests returned empty bar lists that replaced
+    Friday's data, leaving every US symbol with no bars and no recovery.
+    A single shared budget across subscribe/refresh/resubscribe makes that
+    arithmetic impossible rather than merely unlikely."""
+
+    def __init__(self, max_requests: int = 48, window_sec: float = 600.0):
+        self._max_requests = max_requests
+        self._window_sec = window_sec
+        self._request_times: deque[float] = deque()
+        self._now = time.monotonic  # injectable for tests
+
+    async def wait_turn(self) -> None:
+        while True:
+            now = self._now()
+            while self._request_times and now - self._request_times[0] > self._window_sec:
+                self._request_times.popleft()
+            if len(self._request_times) < self._max_requests:
+                self._request_times.append(now)
+                return
+            wait = self._request_times[0] + self._window_sec - now
+            log.warning(
+                "Historical-data pacing budget exhausted (%d requests in the last "
+                "%.0fs) -- delaying the next request %.0fs to stay inside IB's limit.",
+                len(self._request_times),
+                self._window_sec,
+                wait,
+            )
+            await asyncio.sleep(max(wait, 1.0))
 
 _BAR_SIZE_UNIT_SECONDS = {"sec": 1, "min": 60, "hour": 3600, "day": 86400, "week": 604800}
 
@@ -64,6 +103,7 @@ class BarStream:
         self._bar_lists: dict[str, object] = {}
         self._polled: dict[str, tuple[Contract, bool, str]] = {}
         self._live: dict[str, tuple[Contract, bool, str]] = {}
+        self._pacer = _HistoricalRequestPacer()
 
     async def subscribe(
         self,
@@ -74,6 +114,7 @@ class BarStream:
         live_updates: bool = True,
     ) -> None:
         if live_updates:
+            await self._pacer.wait_turn()
             bars = await self.ib.reqHistoricalDataAsync(
                 contract,
                 endDateTime="",
@@ -101,6 +142,7 @@ class BarStream:
 
     async def refresh_polled(self, symbol: str) -> None:
         contract, use_rth, what_to_show = self._polled[symbol]
+        await self._pacer.wait_turn()
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
@@ -141,6 +183,7 @@ class BarStream:
         old_bars = self._bar_lists.get(symbol)
         if old_bars is not None:
             self.ib.cancelHistoricalData(old_bars)
+        await self._pacer.wait_turn()
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
@@ -152,7 +195,18 @@ class BarStream:
             keepUpToDate=True,
         )
         self._bar_lists[symbol] = bars
-        log.info("Re-subscribed stale live bar stream for %s", symbol)
+        if bars:
+            log.info("Re-subscribed stale live bar stream for %s", symbol)
+        else:
+            # Keep the (empty but keepUpToDate) subscription -- it may start
+            # ticking when the farm recovers -- and the stale checker now
+            # treats empty live subscriptions as resubscribe candidates, so
+            # this state self-heals after the cooldown instead of sitting
+            # bar-less forever (confirmed live at a Monday US open).
+            log.warning(
+                "Re-subscribe for %s returned no bars -- will retry after the cooldown.",
+                symbol,
+            )
 
     def log_latest(self, symbol: str) -> None:
         """Logs the current latest bar for a symbol -- works the same for both

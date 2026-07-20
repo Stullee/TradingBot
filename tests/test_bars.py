@@ -116,3 +116,34 @@ def test_unsubscribe_all_clears_live_tracking():
     run(stream.subscribe("AAPL", FakeContract("AAPL"), live_updates=True))
     stream.unsubscribe_all()
     assert not stream.has_live_subscription("AAPL")
+
+
+def test_historical_request_pacer_blocks_after_budget(monkeypatch):
+    """Confirmed live: restart storms + a resubscribe burst exceeded IB's
+    ~60-per-10-min historical-data budget and every further request came
+    back empty. The shared pacer must delay requests past the budget."""
+    import asyncio
+
+    from tradingbot.data.bars import _HistoricalRequestPacer
+
+    pacer = _HistoricalRequestPacer(max_requests=2, window_sec=100.0)
+    clock = {"now": 0.0}
+    pacer._now = lambda: clock["now"]
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr("tradingbot.data.bars.asyncio.sleep", fake_sleep)
+
+    async def scenario():
+        await pacer.wait_turn()
+        clock["now"] += 1
+        await pacer.wait_turn()
+        clock["now"] += 1
+        await pacer.wait_turn()  # over budget -- must wait out the window
+
+    asyncio.run(scenario())
+    assert sleeps  # the third request had to wait
+    assert clock["now"] >= 100.0  # ...until the first request aged out of the window

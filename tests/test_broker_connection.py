@@ -163,3 +163,65 @@ def test_critical_error_hook_fires_only_for_our_own_orders():
     broker._on_ib_error(221, 2104, "farm connection ok", None)  # benign code -> ignored
 
     assert calls == [(221, 200)]
+
+
+def test_contract_meta_uses_market_rule_bands_for_the_routed_exchange():
+    """The DBK incident's root cause: ContractDetails.minTick said 0.0005
+    but TGATE's enforced tick at EUR30 is 0.005 -- the market rule (price
+    bands), selected positionally by exchange, is the authority."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from ib_async import PriceIncrement
+
+    from tradingbot.broker.connection import BrokerConnection
+    from tradingbot.config import Settings
+
+    broker = BrokerConnection(Settings(ib_port=7497, symbols="AAPL"))
+    details = SimpleNamespace(
+        minTick=0.0005, sizeIncrement=0.0, minSize=0.0,
+        marketRuleIds="26,1707", validExchanges="SMART,TGATE",
+    )
+    requested_rules = []
+
+    async def fake_details(contract):
+        return [details]
+
+    async def fake_rule(rule_id):
+        requested_rules.append(rule_id)
+        return [PriceIncrement(0.0, 0.001), PriceIncrement(10.0, 0.005)]
+
+    broker.ib.reqContractDetailsAsync = fake_details
+    broker.ib.reqMarketRuleAsync = fake_rule
+    contract = SimpleNamespace(symbol="DBK", exchange="TGATE", secType="STK")
+
+    meta = asyncio.run(broker.contract_meta(contract))
+    assert requested_rules == [1707]  # TGATE's rule, not SMART's
+    assert meta.price_increments == ((0.0, 0.001), (10.0, 0.005))
+    assert meta.tick_for(30.59) == 0.005
+
+
+def test_contract_meta_stock_fallback_clamps_min_tick_to_a_cent():
+    """With no market rule available, the reported sub-cent minTick must
+    not produce sub-tick prices again -- stocks floor at 0.01."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from tradingbot.broker.connection import BrokerConnection
+    from tradingbot.config import Settings
+
+    broker = BrokerConnection(Settings(ib_port=7497, symbols="AAPL"))
+    details = SimpleNamespace(
+        minTick=0.0005, sizeIncrement=0.0, minSize=0.0,
+        marketRuleIds="", validExchanges="",
+    )
+
+    async def fake_details(contract):
+        return [details]
+
+    broker.ib.reqContractDetailsAsync = fake_details
+    contract = SimpleNamespace(symbol="DBK", exchange="TGATE", secType="STK")
+
+    meta = asyncio.run(broker.contract_meta(contract))
+    assert meta.min_tick == 0.01
+    assert meta.price_increments == ()

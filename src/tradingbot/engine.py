@@ -443,6 +443,7 @@ class TradingEngine:
         if now - self._last_protection_check >= PROTECTION_CHECK_SEC:
             self._last_protection_check = now
             self._ensure_protective_stops()
+            self.orders.cancel_stale_entries()
 
         # Pending (placed but unfilled) entries count as occupied position
         # slots; their risk stays counted until the position is flat again.
@@ -605,7 +606,7 @@ class TradingEngine:
             meta = self.contract_meta.get(symbol, ContractMeta())
             outside_rth = BUILTIN_MARKETS[spec.market].outside_rth if spec else False
             self.orders.place_protective_stop(
-                contract, qty, stop_price, outside_rth=outside_rth, min_tick=meta.min_tick
+                contract, qty, stop_price, outside_rth=outside_rth, meta=meta
             )
             self.alerts.send_soon(
                 f"naked-position-{symbol}",
@@ -887,7 +888,7 @@ class TradingEngine:
             stop_price,
             target_price,
             outside_rth=outside_rth,
-            min_tick=meta.min_tick,
+            meta=meta,
         )
         self.journal.record_entry_context(
             symbol,

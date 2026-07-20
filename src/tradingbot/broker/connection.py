@@ -27,13 +27,33 @@ CRITICAL_ORDER_ERROR_CODES = {103, 110, 200, 201, 203, 321, 461, 462, 10148}
 
 @dataclass(frozen=True)
 class ContractMeta:
-    """Per-contract trading increments from IB's ContractDetails. 0 means
-    "not reported" -- the engine then falls back to whole shares (stocks) or
-    a tiny fractional increment (crypto), reproducing sane defaults."""
+    """Per-contract trading increments from IB's ContractDetails + market
+    rule. 0/empty means "not reported" -- the engine then falls back to
+    whole shares (stocks) or a tiny fractional increment (crypto).
+
+    `price_increments` are the exchange's *price-banded* ticks ((low_edge,
+    increment), ascending) from IB's market rule. This matters because
+    ContractDetails.minTick alone is the smallest theoretical tick, not the
+    enforced one: confirmed live, DBK@TGATE reported a sub-0.005 minTick,
+    the bracket children went out at 4 decimals, and both were rejected
+    with error 110 ("price does not conform to the minimum price
+    variation") -- the MiFID band for a EUR30 stock is 0.005."""
 
     min_tick: float = 0.01
     size_increment: float = 0.0
     min_size: float = 0.0
+    price_increments: tuple[tuple[float, float], ...] = ()
+
+    def tick_for(self, price: float) -> float:
+        """The enforceable price increment at `price`: the market-rule band
+        covering it, else the plain min_tick."""
+        tick = 0.0
+        for low_edge, increment in self.price_increments:
+            if price >= low_edge:
+                tick = increment
+            else:
+                break  # bands are sorted by low_edge
+        return tick or self.min_tick or 0.01
 
 
 class BrokerConnection:
@@ -186,10 +206,10 @@ class BrokerConnection:
         return qualified
 
     async def contract_meta(self, contract: Contract) -> ContractMeta:
-        """Fetches the contract's minimum price tick and size increments so
-        orders conform to the venue's rules (HK tick bands/board lots,
-        fractional crypto sizes). Any failure falls back to defaults that
-        reproduce the old behavior rather than blocking the symbol."""
+        """Fetches the contract's price increments (market-rule bands +
+        minTick) and size increments so orders conform to the venue's rules
+        (MiFID/HK tick bands, board lots, fractional crypto sizes). Any
+        failure falls back to defaults rather than blocking the symbol."""
         try:
             details = await self.ib.reqContractDetailsAsync(contract)
         except Exception as exc:  # noqa: BLE001 - metadata is best-effort
@@ -206,11 +226,49 @@ class BrokerConnection:
                 return 0.0
             return v if v > 0 else 0.0
 
+        min_tick = _positive(d.minTick) or 0.01
+        increments = await self._price_increments(contract, d)
+        if not increments and getattr(contract, "secType", "") == "STK":
+            # No band info and minTick is only the smallest *theoretical*
+            # tick (see class docstring) -- a one-cent floor is valid for
+            # every stock in this bot's universe and prevents the sub-tick
+            # rejections seen live, at the cost of sub-$1/EUR1 penny-stock
+            # precision this bot doesn't trade anyway.
+            min_tick = max(min_tick, 0.01)
+
         return ContractMeta(
-            min_tick=_positive(d.minTick) or 0.01,
+            min_tick=min_tick,
             size_increment=_positive(getattr(d, "sizeIncrement", 0.0)),
             min_size=_positive(getattr(d, "minSize", 0.0)),
+            price_increments=increments,
         )
+
+    async def _price_increments(self, contract: Contract, details) -> tuple:
+        """Price-banded tick sizes from IB's market rule for the exchange
+        this contract actually routes to. marketRuleIds is comma-separated,
+        positionally aligned with validExchanges."""
+        rule_ids = [r.strip() for r in (getattr(details, "marketRuleIds", "") or "").split(",") if r.strip()]
+        if not rule_ids:
+            return ()
+        exchanges = [
+            e.strip() for e in (getattr(details, "validExchanges", "") or "").split(",") if e.strip()
+        ]
+        rule_id = rule_ids[0]
+        if contract.exchange in exchanges and len(rule_ids) == len(exchanges):
+            rule_id = rule_ids[exchanges.index(contract.exchange)]
+        try:
+            rule = await self.ib.reqMarketRuleAsync(int(rule_id))
+        except Exception as exc:  # noqa: BLE001 - metadata is best-effort
+            log.warning(
+                "Could not fetch market rule %s for %s: %s", rule_id, contract.symbol, exc
+            )
+            return ()
+        increments = sorted(
+            (float(pi.lowEdge), float(pi.increment))
+            for pi in (rule or [])
+            if float(pi.increment) > 0
+        )
+        return tuple(increments)
 
     def account_net_liquidation(self) -> float:
         account = self.settings.ib_account_id or ""

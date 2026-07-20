@@ -3,17 +3,28 @@ end-of-day flatten-all. Every entry always carries a protective stop -- no naked
 positions are ever opened, and ensure_protective_stop() re-attaches one if a
 position is ever found without it (e.g. expired DAY children after a holiday).
 
-Prices are rounded to the contract's own minimum tick, not a blanket 2
-decimals -- exchanges with banded tick sizes (e.g. Hong Kong: a HK$380 stock
-ticks in 0.2) reject orders at off-tick prices, and a rejected bracket child
-is exactly the naked-position situation the bracket exists to prevent."""
+Prices are rounded to the contract's *price-banded* tick (ContractMeta's
+market-rule bands, falling back to its minTick) -- exchanges with banded
+ticks (MiFID: a EUR30 stock ticks in 0.005; Hong Kong: a HK$380 stock ticks
+in 0.2) reject orders at off-tick prices with error 110, and a rejected
+bracket child is exactly the naked-position situation the bracket exists to
+prevent (confirmed live: DBK children at 4 decimals, both legs cancelled)."""
 from __future__ import annotations
 
 import logging
+import time
 
 from ib_async import IB, Contract, LimitOrder, MarketOrder, StopOrder, Trade
 
+from tradingbot.broker.connection import ContractMeta
+
 log = logging.getLogger(__name__)
+
+# An entry market order on a liquid symbol fills in seconds. One still not
+# done after this long is stuck -- e.g. a parent whose bracket children were
+# rejected at invalid prices was never transmitted and sat pending
+# (confirmed live), blocking its symbol and occupying a position slot.
+STALE_ENTRY_MAX_AGE_SEC = 600.0
 
 
 def round_to_tick(price: float, min_tick: float) -> float:
@@ -37,10 +48,32 @@ class OrderManager:
         # max-concurrent-positions cap can be blown straight through on a
         # broad market move (exactly when correlated over-entry hurts most).
         self._entry_trades: dict[int, Trade] = {}
+        self._entry_placed_at: dict[int, float] = {}
 
     def _prune_entries(self) -> None:
         for con_id in [c for c, t in self._entry_trades.items() if t.isDone()]:
             del self._entry_trades[con_id]
+            self._entry_placed_at.pop(con_id, None)
+
+    def cancel_stale_entries(self, max_age_sec: float = STALE_ENTRY_MAX_AGE_SEC) -> None:
+        """Cancels entry parents that are neither filled nor cancelled after
+        max_age_sec -- see STALE_ENTRY_MAX_AGE_SEC. Without this, a stuck
+        parent blocks its symbol from new entries and counts as an occupied
+        position slot indefinitely."""
+        self._prune_entries()
+        now = time.monotonic()
+        for con_id, trade in list(self._entry_trades.items()):
+            placed_at = self._entry_placed_at.get(con_id)
+            if placed_at is None or now - placed_at < max_age_sec:
+                continue
+            log.warning(
+                "Cancelling stale entry order for %s: not filled/cancelled after %.0f min.",
+                trade.contract.symbol,
+                (now - placed_at) / 60,
+            )
+            self.ib.cancelOrder(trade.order)
+            del self._entry_trades[con_id]
+            self._entry_placed_at.pop(con_id, None)
 
     def has_pending_entry(self, con_id: int) -> bool:
         """True while an entry parent order for this contract is neither
@@ -61,13 +94,14 @@ class OrderManager:
         stop_price: float,
         target_price: float,
         outside_rth: bool = False,
-        min_tick: float = 0.01,
+        meta: ContractMeta | None = None,
     ) -> Trade:
         """action: 'BUY' to go long, 'SELL' to go short. Returns the parent Trade.
         outside_rth must be True for the order to be eligible to trigger/fill
         outside a market's regular trading hours (e.g. US pre/post-market)."""
         if quantity <= 0:
             raise ValueError("quantity must be positive")
+        meta = meta or ContractMeta()
 
         exit_action = "SELL" if action == "BUY" else "BUY"
 
@@ -81,12 +115,16 @@ class OrderManager:
         parent.outsideRth = outside_rth
         parent.tif = "DAY"
 
-        take_profit = LimitOrder(exit_action, quantity, round_to_tick(target_price, min_tick))
+        take_profit = LimitOrder(
+            exit_action, quantity, round_to_tick(target_price, meta.tick_for(target_price))
+        )
         take_profit.transmit = False
         take_profit.outsideRth = outside_rth
         take_profit.tif = "DAY"
 
-        stop_loss = StopOrder(exit_action, quantity, round_to_tick(stop_price, min_tick))
+        stop_loss = StopOrder(
+            exit_action, quantity, round_to_tick(stop_price, meta.tick_for(stop_price))
+        )
         stop_loss.transmit = True
         stop_loss.outsideRth = outside_rth
         stop_loss.tif = "DAY"
@@ -101,6 +139,7 @@ class OrderManager:
         self.ib.placeOrder(contract, stop_loss)
 
         self._entry_trades[contract.conId] = parent_trade
+        self._entry_placed_at[contract.conId] = time.monotonic()
 
         log.info(
             "Bracket order placed: %s %s x%s, stop=%.4f, target=%.4f",
@@ -147,14 +186,17 @@ class OrderManager:
         position_qty: float,
         stop_price: float,
         outside_rth: bool = False,
-        min_tick: float = 0.01,
+        meta: ContractMeta | None = None,
     ) -> Trade:
         """Attaches a standalone stop-loss to an existing position that has
         none (found by the engine's reconciliation pass -- e.g. bracket
         children that expired as DAY orders while the position survived an
         early close, or a restart mid-bracket)."""
+        meta = meta or ContractMeta()
         action = "SELL" if position_qty > 0 else "BUY"
-        order = StopOrder(action, abs(position_qty), round_to_tick(stop_price, min_tick))
+        order = StopOrder(
+            action, abs(position_qty), round_to_tick(stop_price, meta.tick_for(stop_price))
+        )
         order.tif = "DAY"
         order.outsideRth = outside_rth
         trade = self.ib.placeOrder(contract, order)

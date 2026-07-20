@@ -39,6 +39,7 @@ def make_engine() -> TradingEngine:
         flatten_all=lambda: None,
         pending_entry_conids=lambda: set(),
         has_pending_entry=lambda con_id: False,
+        cancel_stale_entries=lambda **kw: None,
     )
     for market in list(engine.market_sessions):
         engine.market_sessions[market] = AlwaysClosedSession()

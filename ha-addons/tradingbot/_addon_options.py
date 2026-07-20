@@ -20,4 +20,12 @@ def apply_options_as_env() -> None:
     for key, value in options.items():
         if value is None:
             continue
-        os.environ[key.upper()] = str(value)
+        env_key = key.upper()
+        # An explicitly provided environment variable wins over the stored
+        # option -- lets one-off runs override single settings without
+        # touching (and restarting) the live add-on config, e.g. comparing
+        # strategies:  docker exec -e STRATEGY=vwap_mean_reversion \
+        #   <container> python /app/addon_backtest_entrypoint.py
+        if env_key in os.environ:
+            continue
+        os.environ[env_key] = str(value)

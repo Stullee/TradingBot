@@ -42,6 +42,7 @@ options:
   trend_ema_period: 50
   trend_window: 20
   min_r_squared: 0.7
+  trend_entry_max_dist_atr: 1.0
   atr_period: 14
   stop_atr_mult: 1.5
   target_atr_mult: 2.5
@@ -93,6 +94,7 @@ schema:
   trend_ema_period: int(0,500)
   trend_window: int(5,200)
   min_r_squared: float(0,1)
+  trend_entry_max_dist_atr: float(0,10)
   atr_period: int(2,100)
   stop_atr_mult: float(0.1,20)
   target_atr_mult: float(0.1,20)

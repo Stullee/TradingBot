@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # over the window by chance).
     trend_window: int = 20
     min_r_squared: float = 0.7
+    # trendline_breakout only: on the first bar of a session with a valid
+    # fit, allow an entry without a fresh cross if price is beyond the line
+    # by at most this many ATRs -- a trend established during the session
+    # warmup would otherwise never be entered (its crossing bar happened
+    # while signals were still disabled). 0 = pure crossing entries only.
+    trend_entry_max_dist_atr: float = 1.0
     atr_period: int = 14
     stop_atr_mult: float = 1.5
     target_atr_mult: float = 2.5

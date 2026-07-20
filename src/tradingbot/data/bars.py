@@ -54,6 +54,21 @@ class _HistoricalRequestPacer:
             )
             await asyncio.sleep(max(wait, 1.0))
 
+    def try_turn(self) -> bool:
+        """Non-blocking variant: True (and consumes a slot) if the budget
+        allows a request right now, False otherwise. Used by maintenance
+        requests (polled refreshes, stale resubscribes) that should SKIP a
+        cycle rather than stall the engine's tick loop waiting for budget
+        -- confirmed live: blocking waits inside the tick collapsed the
+        whole engine cadence to minutes per tick."""
+        now = self._now()
+        while self._request_times and now - self._request_times[0] > self._window_sec:
+            self._request_times.popleft()
+        if len(self._request_times) < self._max_requests:
+            self._request_times.append(now)
+            return True
+        return False
+
 _BAR_SIZE_UNIT_SECONDS = {"sec": 1, "min": 60, "hour": 3600, "day": 86400, "week": 604800}
 
 
@@ -142,7 +157,11 @@ class BarStream:
 
     async def refresh_polled(self, symbol: str) -> None:
         contract, use_rth, what_to_show = self._polled[symbol]
-        await self._pacer.wait_turn()
+        if symbol in self._bar_lists and not self._pacer.try_turn():
+            return  # budget exhausted -- keep current bars, catch the next cycle
+        if symbol not in self._bar_lists:
+            # First-ever fetch for this symbol: worth waiting for budget.
+            await self._pacer.wait_turn()
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
@@ -180,10 +199,16 @@ class BarStream:
         if info is None:
             return
         contract, use_rth, what_to_show = info
+        if not self._pacer.try_turn():
+            log.info(
+                "Skipping resubscribe for %s -- historical-data budget exhausted; "
+                "the stale checker will retry after its cooldown.",
+                symbol,
+            )
+            return
         old_bars = self._bar_lists.get(symbol)
         if old_bars is not None:
             self.ib.cancelHistoricalData(old_bars)
-        await self._pacer.wait_turn()
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",

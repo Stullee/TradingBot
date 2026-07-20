@@ -147,3 +147,11 @@ def test_historical_request_pacer_blocks_after_budget(monkeypatch):
     asyncio.run(scenario())
     assert sleeps  # the third request had to wait
     assert clock["now"] >= 100.0  # ...until the first request aged out of the window
+
+
+def test_pacer_try_turn_is_non_blocking():
+    from tradingbot.data.bars import _HistoricalRequestPacer
+
+    pacer = _HistoricalRequestPacer(max_requests=1, window_sec=600.0)
+    assert pacer.try_turn() is True
+    assert pacer.try_turn() is False  # budget spent -- caller must skip, not wait

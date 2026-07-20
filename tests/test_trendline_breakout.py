@@ -143,3 +143,39 @@ def test_exit_defers_to_bracket_when_session_too_young():
     strat = make_strategy()
     df = df_with_sessions([[110.0, 109.5, 109.0, 108.5, 108.0], [100.0, 99.0]])
     assert strat.is_exit_signal(df, position_is_long=True) is False
+
+
+def test_first_valid_fit_allows_late_entry_within_distance_cap():
+    """The META lesson: a trend established during the session warmup has
+    no crossing bar afterwards -- price is already above the line when the
+    fit first becomes valid, so the old rule could never enter. On exactly
+    that first-valid bar, entry is allowed within the ATR distance cap."""
+    strat = TrendlineBreakout(
+        trend_window=5, min_r_squared=0.7, atr_period=2, entry_max_dist_atr=1.0
+    )
+    friday = [90.0, 89.5, 89.0, 88.5, 88.0]
+    # Convex rise: price sits ABOVE its own fitted line the whole time (a
+    # linear rise would end exactly ON the line and cross "naturally") --
+    # so without the late-entry rule there is genuinely no crossing bar.
+    monday = [100.0, 101.0, 102.0, 103.0, 105.0, 107.0]
+    df = df_with_sessions([friday, monday])
+    df["atr"] = 1.0
+    assert strat.generate_signal(df) == Signal.LONG
+
+    # one bar later (no fresh cross) the late-entry window is closed
+    monday_later = monday + [108.0]
+    df2 = df_with_sessions([friday, monday_later])
+    df2["atr"] = 1.0
+    assert strat.generate_signal(df2) == Signal.FLAT
+
+    # too far above the line -> not chased even on the first valid bar
+    monday_extended = [100.0, 101.0, 102.0, 103.0, 105.0, 115.0]
+    df3 = df_with_sessions([friday, monday_extended])
+    df3["atr"] = 1.0
+    assert strat.generate_signal(df3) == Signal.FLAT
+
+    # feature off -> pure crossing behavior (no entry)
+    strict = TrendlineBreakout(
+        trend_window=5, min_r_squared=0.7, atr_period=2, entry_max_dist_atr=0.0
+    )
+    assert strict.generate_signal(df) == Signal.FLAT

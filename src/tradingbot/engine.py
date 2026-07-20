@@ -100,6 +100,7 @@ def build_strategy(settings: Settings) -> Strategy:
             min_r_squared=settings.min_r_squared,
             atr_period=settings.atr_period,
             allow_shorting=settings.allow_shorting,
+            entry_max_dist_atr=settings.trend_entry_max_dist_atr,
         )
     return VwapMeanReversion(
         rsi_period=settings.rsi_period,
@@ -180,6 +181,13 @@ class TradingEngine:
         self._last_polled_refresh = 0.0
         self._last_stale_check = 0.0
         self._last_resubscribe_attempt: dict[str, float] = {}
+        # Per-symbol adaptive cooldown: doubles (capped at 1h) each time a
+        # resubscribe fails to advance the symbol's bar clock -- delayed
+        # feeds and farm outages aren't fixable by resubscribing, and the
+        # fixed cooldown alone let 22 futile retries per 5 minutes saturate
+        # the pacing budget all afternoon (confirmed live).
+        self._resubscribe_cooldown: dict[str, float] = {}
+        self._bar_at_last_resubscribe: dict[str, object] = {}
         self._dashboard_task: asyncio.Task | None = None
         # Latest bar-strategy indicator/signal snapshot per symbol, read
         # directly by the live dashboard (webapp.py) -- a plain shared dict
@@ -203,7 +211,9 @@ class TradingEngine:
         await self.broker.connect_with_retry()
         self.bars = BarStream(self.broker.ib, self.settings.bar_size)
         self.orders = OrderManager(self.broker.ib)
-        self.fx = FxConverter(self.broker.ib)
+        self.fx = FxConverter(
+            self.broker.ib, cache_path=Path(self.settings.log_dir) / "fx_rates.json"
+        )
 
         for spec in list(self.symbol_specs):
             try:
@@ -246,6 +256,16 @@ class TradingEngine:
         await asyncio.sleep(2)  # let the first snapshot of bars arrive
         equity = self.broker.account_net_liquidation()
         self.base_currency = self.broker.account_base_currency()
+        # Warm every FX pair the universe can need, now -- a signal-time
+        # subscription gets 10 seconds to produce a rate; a startup one
+        # gets the whole session (and the persisted last-known rate covers
+        # the gap either way). Confirmed live: a cold post-restart EURUSD
+        # ticker stayed empty all afternoon and deferred every US entry.
+        needed_currencies = sorted(
+            {spec.currency for spec in self.symbol_specs if spec.currency != self.base_currency}
+        )
+        if needed_currencies:
+            await self.fx.warm_up([(self.base_currency, ccy) for ccy in needed_currencies])
         self._trading_day = datetime.now(timezone.utc).date()
         # Restore (not reset) today's loss baseline and any latched kill
         # switch if this is a same-day restart -- a restart must not grant a
@@ -568,9 +588,27 @@ class TradingEngine:
         on_cooldown = 0
         for i, (symbol, age_sec) in enumerate(stale_symbols):
             last_attempt = self._last_resubscribe_attempt.get(symbol)
-            if last_attempt is not None and now_monotonic - last_attempt < RESUBSCRIBE_COOLDOWN_SEC:
+            cooldown = self._resubscribe_cooldown.get(symbol, RESUBSCRIBE_COOLDOWN_SEC)
+            if last_attempt is not None and now_monotonic - last_attempt < cooldown:
                 on_cooldown += 1
                 continue
+
+            # Did the previous attempt actually help? If the bar clock
+            # hasn't advanced since, back off exponentially (cap 1h) --
+            # the problem is upstream, not the subscription.
+            latest_now = self.bars.latest_bar_time(symbol)
+            if last_attempt is not None and self._bar_at_last_resubscribe.get(symbol) == latest_now:
+                cooldown = min(cooldown * 2, 3600.0)
+                self._resubscribe_cooldown[symbol] = cooldown
+                log.info(
+                    "%s: previous resubscribe didn't advance the bar clock -- backing "
+                    "off to %.0f min between attempts.",
+                    symbol,
+                    cooldown / 60,
+                )
+            else:
+                self._resubscribe_cooldown[symbol] = RESUBSCRIBE_COOLDOWN_SEC
+            self._bar_at_last_resubscribe[symbol] = latest_now
 
             if resubscribed > 0:
                 await asyncio.sleep(_RESUBSCRIBE_REQUEST_GAP_SEC)

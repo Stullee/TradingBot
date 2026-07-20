@@ -175,3 +175,32 @@ def test_empty_live_subscription_recovers_after_the_open_threshold(monkeypatch):
         engine2.market_sessions[market] = OpenedRecentlySession(minutes_ago=5.0)
     run(engine2._check_stale_bars())
     assert engine2.bars.resubscribe_calls == []
+
+
+def test_resubscribe_backs_off_when_the_bar_clock_does_not_advance(monkeypatch):
+    """Confirmed live: delayed-feed symbols were resubscribed every 5 min
+    all afternoon (futile -- the delay is upstream), saturating the pacing
+    budget and starving crypto refreshes. Unproductive resubscribes must
+    back off exponentially."""
+    monkeypatch.setattr("tradingbot.engine.asyncio.sleep", _fast_sleep)
+    engine = make_engine(["AAPL"])
+    run(engine._check_stale_bars())
+    assert engine.bars.resubscribe_calls == ["AAPL"]
+
+    # cooldown expired, bar unchanged -> retry happens but cooldown doubles
+    engine._last_resubscribe_attempt["AAPL"] = time.monotonic() - RESUBSCRIBE_COOLDOWN_SEC - 1
+    run(engine._check_stale_bars())
+    assert engine.bars.resubscribe_calls == ["AAPL", "AAPL"]
+    assert engine._resubscribe_cooldown["AAPL"] == RESUBSCRIBE_COOLDOWN_SEC * 2
+
+    # base cooldown elapsed again, but the DOUBLED cooldown now applies
+    engine._last_resubscribe_attempt["AAPL"] = time.monotonic() - RESUBSCRIBE_COOLDOWN_SEC - 1
+    run(engine._check_stale_bars())
+    assert len(engine.bars.resubscribe_calls) == 2
+
+    # a bar that finally advances resets the cooldown to the base value
+    engine._last_resubscribe_attempt["AAPL"] = time.monotonic() - 2 * RESUBSCRIBE_COOLDOWN_SEC - 1
+    engine.bars.latest_times["AAPL"] = datetime.now(timezone.utc) - timedelta(minutes=30)
+    run(engine._check_stale_bars())
+    assert len(engine.bars.resubscribe_calls) == 3
+    assert engine._resubscribe_cooldown["AAPL"] == RESUBSCRIBE_COOLDOWN_SEC

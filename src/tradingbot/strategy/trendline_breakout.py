@@ -49,11 +49,21 @@ class TrendlineBreakout(Strategy):
         min_r_squared: float = 0.7,
         atr_period: int = 14,
         allow_shorting: bool = False,
+        entry_max_dist_atr: float = 1.0,
     ):
         self.trend_window = trend_window
         self.min_r_squared = min_r_squared
         self.atr_period = atr_period
         self.allow_shorting = allow_shorting
+        # A trend that establishes itself DURING the session warmup can
+        # never produce a crossing bar afterwards -- by the first valid
+        # fit, price is already beyond the line (confirmed live: META,
+        # slope +0.50, R-squared 0.89, watched all afternoon with no
+        # entry). On exactly the first bar where the session fit becomes
+        # valid, an entry is allowed without a cross if price is beyond
+        # the line by no more than this many ATRs (a distance cap so a
+        # far-extended move isn't chased). 0 disables (pure crossing).
+        self.entry_max_dist_atr = entry_max_dist_atr
 
     @property
     def min_bars(self) -> int:
@@ -102,6 +112,19 @@ class TrendlineBreakout(Strategy):
         tol = abs(prev_line) * 1e-9 + 1e-9
         crossed_above = prev_close <= prev_line + tol and curr_close > curr_line
         crossed_below = prev_close >= prev_line - tol and curr_close < curr_line
+
+        # First bar of the session with a valid fit: the crossing (if any)
+        # happened during warmup -- allow a late entry within the distance
+        # cap. Fires at most once per session by construction.
+        first_valid_fit = len(closes) == self.trend_window + 1
+        if first_valid_fit and self.entry_max_dist_atr > 0 and "atr" in df.columns:
+            atr_value = float(df["atr"].iloc[-1])
+            if atr_value > 0:
+                max_dist = self.entry_max_dist_atr * atr_value
+                if 0 < curr_close - curr_line <= max_dist:
+                    crossed_above = True
+                elif 0 < curr_line - curr_close <= max_dist:
+                    crossed_below = True
 
         if crossed_above and curr_slope > 0 and curr_r2 >= self.min_r_squared:
             return Signal.LONG

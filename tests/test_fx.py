@@ -171,3 +171,32 @@ def test_unsubscribe_all_cancels_every_open_subscription():
     run(fx.rate("EUR", "KRW"))
     fx.unsubscribe_all()
     assert set(ib.cancel_calls) == {"EURUSD", "EURKRW"}
+
+
+def test_stale_rate_fallback_survives_a_restart(tmp_path):
+    """Confirmed live: a post-restart EURUSD subscription received no ticks
+    all afternoon and every US entry was deferred for hours -- the
+    morning's persisted rate must size them instead."""
+    cache = tmp_path / "fx_rates.json"
+    fx_live = FxConverter(
+        FakeIB({"EURUSD": 1.10}), first_tick_attempts=1, first_tick_delay_sec=0,
+        cache_path=cache,
+    )
+    assert run(fx_live.rate("EUR", "USD")) == 1.10  # live rate, persisted
+
+    dead_ib = FakeIB({"EURUSD": None})  # qualifies, but the ticker never populates
+    fx_restarted = FxConverter(
+        dead_ib, first_tick_attempts=1, first_tick_delay_sec=0, cache_path=cache
+    )
+    assert run(fx_restarted.rate("EUR", "USD")) == 1.10  # stale fallback
+    assert run(fx_restarted.rate("USD", "EUR")) == pytest.approx(1 / 1.10)
+
+
+def test_nonexistent_pair_is_probed_only_once():
+    """The USDEUR probe (IB lists only one direction) was re-fired on every
+    signal, costing an error round trip each time."""
+    ib = FakeIB({"EURUSD": 1.10})
+    fx = fast_fx(ib)
+    run(fx.rate("USD", "EUR"))
+    run(fx.rate("USD", "EUR"))
+    assert ib.qualify_calls.count("USDEUR") == 1

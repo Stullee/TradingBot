@@ -204,24 +204,25 @@ class BrokerConnection:
                 "the exchange field already disambiguates the listing)."
             )
         # Confirmed live (2026-07-21): qualifying SAP/MBG/VOW3/BMW/etc. on
-        # exchange="IBIS" came back with qualified.exchange == "TGATE" (an
-        # alternate German MTF listing sharing the same conId), even though
-        # the exact same symbols qualified fine to IBIS the day before. The
-        # account's market data subscription only covers IBIS, so every
-        # historical-data request against the TGATE-flavored contract fails
-        # with error 162 ("No market data permissions for TGATE STK") --
-        # forever, since resubscribing just re-hits the same wrong venue.
-        # A directly-routed exchange request (anything but "SMART") is an
-        # explicit choice, not a hint IB should feel free to override, so
-        # pin it back to what was actually asked for.
+        # exchange="IBIS" sometimes comes back with qualified.exchange ==
+        # "TGATE" (an alternate German MTF listing sharing the same conId)
+        # instead. This was first read as IB wrongly overriding an explicit
+        # choice and "fixed" by pinning it back to IBIS (0.8.14) -- but the
+        # account's actual market data subscriptions turned out to cover
+        # Tradegate specifically ("Alternative European Equities") with no
+        # separate Xetra line item, meaning the pin may well have been
+        # forcing the WRONG venue rather than the right one. Since neither
+        # side can be confirmed from here, don't guess in either direction
+        # -- trust whatever IB's own qualification resolves to. If that
+        # venue turns out to lack data permissions too, BarStream's
+        # permission-denied handling (see data/bars.py) logs it once and
+        # stops retrying instead of storming forever, so guessing wrong
+        # here is no longer the costly failure mode it used to be.
         if exchange != "SMART" and qualified.exchange != exchange:
-            log.warning(
-                "%s: IB qualified %r to exchange=%s instead of the requested %s "
-                "-- pinning it back (the account's market data subscription may "
-                "not cover %s).",
-                symbol, symbol, qualified.exchange, exchange, qualified.exchange,
+            log.info(
+                "%s: IB qualified %r to exchange=%s instead of the requested %s.",
+                symbol, symbol, qualified.exchange, exchange,
             )
-            qualified.exchange = exchange
         return qualified
 
     async def contract_meta(self, contract: Contract) -> ContractMeta:

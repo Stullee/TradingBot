@@ -201,15 +201,16 @@ def test_contract_meta_uses_market_rule_bands_for_the_routed_exchange():
     assert meta.tick_for(30.59) == 0.005
 
 
-def test_qualify_contract_pins_a_directly_routed_exchange_ib_tried_to_override():
+def test_qualify_contract_trusts_ib_even_when_it_picks_a_different_venue():
     """Confirmed live (2026-07-21): qualifying SAP/MBG/VOW3/BMW/etc. on
-    exchange="IBIS" came back from IB with exchange="TGATE" instead (an
-    alternate German MTF sharing the same conId) even though the identical
-    symbols qualified fine to IBIS the day before. The account's market
-    data subscription doesn't cover TGATE, so every historical-data request
-    against that contract failed with error 162 forever -- resubscribing
-    just re-hits the same wrong venue. A directly-routed exchange (anything
-    but SMART) must be pinned back to what was actually requested."""
+    exchange="IBIS" sometimes comes back from IB with exchange="TGATE"
+    instead (an alternate German MTF sharing the same conId). This was
+    first read as IB wrongly overriding an explicit choice and pinned back
+    to IBIS -- but the account's actual data subscription turned out to
+    cover Tradegate specifically, with no separate Xetra line item, so the
+    pin may have been forcing the wrong venue. Since which venue is truly
+    entitled can't be confirmed here, qualify_contract must not guess in
+    either direction -- it returns whatever IB itself resolved to."""
     broker = make_broker()
 
     async def fake_qualify(contract):
@@ -218,7 +219,7 @@ def test_qualify_contract_pins_a_directly_routed_exchange_ib_tried_to_override()
 
     broker.ib.qualifyContractsAsync = fake_qualify
     qualified = run(broker.qualify_contract("STK", "SAP", "IBIS", "EUR"))
-    assert qualified.exchange == "IBIS"
+    assert qualified.exchange == "TGATE"
 
 
 def test_qualify_contract_leaves_smart_routing_alone():

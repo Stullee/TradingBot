@@ -201,6 +201,42 @@ def test_contract_meta_uses_market_rule_bands_for_the_routed_exchange():
     assert meta.tick_for(30.59) == 0.005
 
 
+def test_qualify_contract_pins_a_directly_routed_exchange_ib_tried_to_override():
+    """Confirmed live (2026-07-21): qualifying SAP/MBG/VOW3/BMW/etc. on
+    exchange="IBIS" came back from IB with exchange="TGATE" instead (an
+    alternate German MTF sharing the same conId) even though the identical
+    symbols qualified fine to IBIS the day before. The account's market
+    data subscription doesn't cover TGATE, so every historical-data request
+    against that contract failed with error 162 forever -- resubscribing
+    just re-hits the same wrong venue. A directly-routed exchange (anything
+    but SMART) must be pinned back to what was actually requested."""
+    broker = make_broker()
+
+    async def fake_qualify(contract):
+        return [Stock(symbol=contract.symbol, exchange="TGATE",
+                       currency=contract.currency, conId=14204)]
+
+    broker.ib.qualifyContractsAsync = fake_qualify
+    qualified = run(broker.qualify_contract("STK", "SAP", "IBIS", "EUR"))
+    assert qualified.exchange == "IBIS"
+
+
+def test_qualify_contract_leaves_smart_routing_alone():
+    """SMART is a deliberate "let IB pick" request (used for US symbols) --
+    IB choosing a specific primaryExchange under it is expected, not a bug
+    to correct."""
+    broker = make_broker()
+
+    async def fake_qualify(contract):
+        return [Stock(symbol=contract.symbol, exchange="SMART",
+                       primaryExchange="NASDAQ", currency=contract.currency, conId=1)]
+
+    broker.ib.qualifyContractsAsync = fake_qualify
+    qualified = run(broker.qualify_contract("STK", "AAPL", "SMART", "USD"))
+    assert qualified.exchange == "SMART"
+    assert qualified.primaryExchange == "NASDAQ"
+
+
 def test_contract_meta_stock_fallback_clamps_min_tick_to_a_cent():
     """With no market rule available, the reported sub-cent minTick must
     not produce sub-tick prices again -- stocks floor at 0.01."""

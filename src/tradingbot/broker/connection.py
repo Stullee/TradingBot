@@ -203,6 +203,25 @@ class BrokerConnection:
                 "differs from other data providers (e.g. no '.DE'/'.L'/'.AS' suffix; "
                 "the exchange field already disambiguates the listing)."
             )
+        # Confirmed live (2026-07-21): qualifying SAP/MBG/VOW3/BMW/etc. on
+        # exchange="IBIS" came back with qualified.exchange == "TGATE" (an
+        # alternate German MTF listing sharing the same conId), even though
+        # the exact same symbols qualified fine to IBIS the day before. The
+        # account's market data subscription only covers IBIS, so every
+        # historical-data request against the TGATE-flavored contract fails
+        # with error 162 ("No market data permissions for TGATE STK") --
+        # forever, since resubscribing just re-hits the same wrong venue.
+        # A directly-routed exchange request (anything but "SMART") is an
+        # explicit choice, not a hint IB should feel free to override, so
+        # pin it back to what was actually asked for.
+        if exchange != "SMART" and qualified.exchange != exchange:
+            log.warning(
+                "%s: IB qualified %r to exchange=%s instead of the requested %s "
+                "-- pinning it back (the account's market data subscription may "
+                "not cover %s).",
+                symbol, symbol, qualified.exchange, exchange, qualified.exchange,
+            )
+            qualified.exchange = exchange
         return qualified
 
     async def contract_meta(self, contract: Contract) -> ContractMeta:

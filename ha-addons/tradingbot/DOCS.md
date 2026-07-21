@@ -186,10 +186,10 @@ news on your configured symbols, has Claude assess whether each new article
 is likely to move the price, and — above `news_confidence_threshold` —
 **simulates** a hypothetical trade using the same ATR stop/target sizing as
 the real strategy. It logs the outcome (win/loss/timeout, or flattened at
-its market's close, with an R-multiple) to `/data/logs/shadow_trades.jsonl`.
+its market's close, with an R-multiple) to `/config/tradingbot_logs/shadow_trades.jsonl`.
 Any still-open shadow trade is also mirrored to
-`/data/logs/open_shadow_trades.json`, and any qualifying assessment that
-couldn't open one yet to `/data/logs/pending_assessments.json` -- both
+`/config/tradingbot_logs/open_shadow_trades.json`, and any qualifying assessment that
+couldn't open one yet to `/config/tradingbot_logs/pending_assessments.json` -- both
 restored on startup, so a restart (add-on rebuild included) doesn't
 silently drop a trade in flight or a pending opportunity.
 
@@ -208,7 +208,7 @@ kept as a pending candidate and retried on later ticks once that clears,
 instead of being skipped and lost. Keep `news_poll_interval_sec` reasonable
 (the default is 5 minutes) to avoid surprises on both providers' usage/rate
 limits. Every article's assessment is persisted to
-`/data/logs/news_analysis.jsonl`, so a restart doesn't reprocess (and
+`/config/tradingbot_logs/news_analysis.jsonl`, so a restart doesn't reprocess (and
 re-bill) the same day's news backlog again — before this was fixed, every
 restart re-assessed everything Finnhub's 1-day lookback returned as "new,"
 which is what actually drains API credits fast on a large watchlist, not
@@ -232,7 +232,7 @@ whether anything was found, so silence there (not just silence in
 `python addon_report_entrypoint.py` (same `docker exec` pattern as the
 backtester, see below) prints a snapshot: account equity, open positions
 with unrealized P&L, today's realized P&L per symbol (also persisted to
-`/data/logs/realized_pnl.json` so a restart doesn't lose P&L for a position
+`/config/tradingbot_logs/realized_pnl.json` so a restart doesn't lose P&L for a position
 that already fully closed), today's fill count, and — reading straight
 from the persisted files above — news
 shadow-trading win rate/expectancy and news-analysis activity. Read-only,
@@ -242,7 +242,7 @@ places no orders.
 
 At every UTC day rollover (after the 23:55 UTC crypto flatten checkpoint,
 so the day is complete) the engine writes a structured summary of the
-finished day to `/data/logs/eod_reports.jsonl`, logs a readable version,
+finished day to `/config/tradingbot_logs/eod_reports.jsonl`, logs a readable version,
 and — if `alert_webhook_url` is set — pushes a one-paragraph digest to
 your phone: trades closed with win/loss and average R, net P&L per
 currency (commissions included), measured entry slippage, equity change vs
@@ -298,8 +298,11 @@ Or standalone: `python -m tradingbot.backtest.compare_runner`.
 ## Logs
 
 Live logs are visible in this add-on's **Log** tab. They're also written to
-`/data/logs/tradingbot.log` (rotating), which persists across add-on
-restarts/updates.
+`/config/tradingbot_logs/` (rotating `tradingbot.log`, plus `trades.jsonl`,
+`shadow_trades.jsonl`, `eod_reports.jsonl`, etc.) -- a folder inside your
+Home Assistant `/config` directory, so no terminal or `docker cp` is needed
+to get to them. Open it with the **Samba share** (`\\homeassistant\config\tradingbot_logs`
+on the same network) or the **File editor**/**Studio Code Server** add-on.
 
 ## Updating
 

@@ -1,6 +1,6 @@
 ---
 name: TradingBot (IB Day Trading)
-version: "0.8.12"
+version: "0.8.13"
 slug: tradingbot
 description: >-
   Automated day-trading bot for Interactive Brokers across US/EU/Asia stocks
@@ -18,6 +18,8 @@ boot: manual
 host_network: true
 ingress: true
 ingress_port: 8099
+map:
+  - config:rw
 panel_icon: mdi:chart-line
 options:
   ib_host: "127.0.0.1"

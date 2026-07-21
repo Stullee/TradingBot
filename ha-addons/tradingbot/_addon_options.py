@@ -29,3 +29,10 @@ def apply_options_as_env() -> None:
         if env_key in os.environ:
             continue
         os.environ[env_key] = str(value)
+
+    # /config is the add-on's mapped share of the Home Assistant config
+    # directory (see config.yaml's `map: config:rw`) -- the same folder
+    # Samba and the File Editor/Studio Code Server add-ons already expose.
+    # Writing logs/journal files there means they just show up for
+    # download, with no docker cp / host-terminal access ever needed.
+    os.environ.setdefault("LOG_DIR", "/config/tradingbot_logs")

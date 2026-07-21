@@ -37,10 +37,20 @@ class FakeContract:
         self.symbol = symbol
 
 
+class _FakeEvent:
+    """Stands in for ib_async's eventkit Event -- supports += like the real
+    thing, but tests fire BarStream._on_error directly rather than routing
+    through it (same pattern test_broker_connection.py uses for _on_ib_error)."""
+
+    def __iadd__(self, handler):
+        return self
+
+
 class FakeIB:
     def __init__(self):
         self.cancel_calls: list[object] = []
         self.req_calls = 0
+        self.errorEvent = _FakeEvent()
 
     async def reqHistoricalDataAsync(self, contract, **kwargs):
         self.req_calls += 1
@@ -116,6 +126,50 @@ def test_unsubscribe_all_clears_live_tracking():
     run(stream.subscribe("AAPL", FakeContract("AAPL"), live_updates=True))
     stream.unsubscribe_all()
     assert not stream.has_live_subscription("AAPL")
+
+
+def test_permission_denied_error_stops_further_polled_refreshes():
+    """Confirmed live: a paper account's crypto symbols hit 'No market data
+    permissions' on every single 60s poll, all day (500+ ERROR-level log
+    lines in one afternoon) -- a permanent account-level gap that no amount
+    of retrying will ever fix. One error must be enough to stop asking."""
+    ib = FakeIB()
+    stream = BarStream(ib, "5 mins")
+    run(stream.subscribe("ETH", FakeContract("ETH"), live_updates=False))
+    assert ib.req_calls == 1
+
+    stream._on_error(1, 162, "No market data permissions for ZEROHASHE CRYPTO", FakeContract("ETH"))
+    assert stream.is_permanently_unavailable("ETH")
+
+    run(stream.refresh_polled("ETH"))
+    run(stream.refresh_all_polled())
+    assert ib.req_calls == 1  # no further requests were made
+
+
+def test_permission_denied_error_stops_further_live_resubscribes():
+    ib = FakeIB()
+    stream = BarStream(ib, "5 mins")
+    run(stream.subscribe("SAP", FakeContract("SAP"), live_updates=True))
+    assert ib.req_calls == 1
+
+    stream._on_error(1, 162, "No market data permissions for TGATE STK", FakeContract("SAP"))
+    run(stream.resubscribe_live("SAP"))
+    assert ib.req_calls == 1  # no further requests were made
+
+
+def test_unrelated_errors_do_not_mark_a_symbol_permission_denied():
+    stream = BarStream(FakeIB(), "5 mins")
+    stream._on_error(1, 200, "No security definition has been found", FakeContract("EUR"))
+    stream._on_error(2, 366, "No historical data query found for ticker id", FakeContract("AAPL"))
+    assert not stream.is_permanently_unavailable("EUR")
+    assert not stream.is_permanently_unavailable("AAPL")
+
+
+def test_permission_denied_is_tracked_independently_per_symbol():
+    stream = BarStream(FakeIB(), "5 mins")
+    stream._on_error(1, 162, "No market data permissions for ZEROHASHE CRYPTO", FakeContract("ETH"))
+    assert stream.is_permanently_unavailable("ETH")
+    assert not stream.is_permanently_unavailable("SOL")
 
 
 def test_historical_request_pacer_blocks_after_budget(monkeypatch):

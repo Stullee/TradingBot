@@ -144,6 +144,43 @@ def test_crypto_short_signal_is_skipped_not_ordered():
     assert engine.latest_signals[symbol]["gate"] == "short unsupported (crypto)"
 
 
+class FakeBarsNoData:
+    """No bars at all -- either "not entitled" or merely "not arrived yet",
+    which the dashboard's why-idle gate must tell apart."""
+
+    def __init__(self, permanently_unavailable: bool):
+        self._permanently_unavailable = permanently_unavailable
+
+    def dataframe(self, symbol: str):
+        return None
+
+    def is_permanently_unavailable(self, symbol: str) -> bool:
+        return self._permanently_unavailable
+
+
+def test_permanently_unavailable_symbol_gets_an_explanatory_gate():
+    """Confirmed live: crypto/EU symbols stuck on a permanent 'No market
+    data permissions' error showed nothing on the dashboard's why-idle
+    column -- _process_symbol returned before ever calling _set_gate."""
+    engine, symbol = make_engine(Signal.LONG)
+    engine.bars = FakeBarsNoData(permanently_unavailable=True)
+
+    run(engine._process_symbol(symbol, 100_000.0, 0, False, False))
+    assert engine.orders.placed == []
+    assert engine.latest_signals[symbol]["gate"] == "no market data permission for this venue"
+
+
+def test_symbol_with_merely_no_bars_yet_leaves_no_gate_set():
+    """A symbol still warming up (not permission-denied) shouldn't be
+    mislabeled -- no gate is set at all until there's something to report."""
+    engine, symbol = make_engine(Signal.LONG)
+    engine.bars = FakeBarsNoData(permanently_unavailable=False)
+
+    run(engine._process_symbol(symbol, 100_000.0, 0, False, False))
+    assert engine.orders.placed == []
+    assert "gate" not in engine.latest_signals.get(symbol, {})
+
+
 def test_stock_short_still_places_orders():
     settings = Settings(
         ib_port=7497, symbols="AAPL", allow_shorting=True, max_weekly_loss_pct=0

@@ -877,6 +877,8 @@ class TradingEngine:
         spec = self.spec_by_symbol[symbol]
         df = self.bars.dataframe(symbol)
         if df is None or df.empty:
+            if self.bars.is_permanently_unavailable(symbol):
+                self._set_gate(symbol, "no market data permission for this venue")
             return
 
         # Keyed off the newest bar's own timestamp, not len(df) -- a

@@ -119,6 +119,33 @@ class BarStream:
         self._polled: dict[str, tuple[Contract, bool, str]] = {}
         self._live: dict[str, tuple[Contract, bool, str]] = {}
         self._pacer = _HistoricalRequestPacer()
+        # Symbols IB has told us (error 162, "No market data permissions")
+        # have no entitlement for historical data at all -- confirmed live:
+        # a paper account's crypto symbols hit this on literally every
+        # single poll, 24/7, forever (over 500 ERROR-level log lines in one
+        # afternoon alone), since it's a permanent account-level gap, not a
+        # transient farm hiccup that resubscribing could ever fix. Once
+        # flagged, stop spending pacing budget and log spam on it for the
+        # rest of this process's life.
+        self._permission_denied: set[str] = set()
+        ib.errorEvent += self._on_error
+
+    def _on_error(self, reqId, errorCode, errorString, contract=None, *_args) -> None:
+        if errorCode != 162 or "No market data permissions" not in errorString:
+            return
+        symbol = getattr(contract, "symbol", None)
+        if not symbol or symbol in self._permission_denied:
+            return
+        self._permission_denied.add(symbol)
+        log.warning(
+            "%s: no market data permissions for this contract's venue -- "
+            "treating as a permanent gap and no longer retrying it this "
+            "session (restart after fixing entitlements to try again).",
+            symbol,
+        )
+
+    def is_permanently_unavailable(self, symbol: str) -> bool:
+        return symbol in self._permission_denied
 
     async def subscribe(
         self,
@@ -156,6 +183,8 @@ class BarStream:
         )
 
     async def refresh_polled(self, symbol: str) -> None:
+        if symbol in self._permission_denied:
+            return
         contract, use_rth, what_to_show = self._polled[symbol]
         if symbol in self._bar_lists and not self._pacer.try_turn():
             return  # budget exhausted -- keep current bars, catch the next cycle
@@ -196,7 +225,7 @@ class BarStream:
         minutes during regular market hours with no error logged, alongside
         an unrelated "market data farm connection is inactive" warning)."""
         info = self._live.get(symbol)
-        if info is None:
+        if info is None or symbol in self._permission_denied:
             return
         contract, use_rth, what_to_show = info
         if not self._pacer.try_turn():

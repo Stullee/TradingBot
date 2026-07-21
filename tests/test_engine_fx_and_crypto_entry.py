@@ -10,12 +10,14 @@
    spot-crypto shorting, the order would only come back rejected.
 """
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pandas as pd
 
 from tradingbot.config import Settings
 from tradingbot.engine import TradingEngine
+from tradingbot.news.shadow_trade import ShadowTradeTracker
 from tradingbot.strategy.base import Signal, Strategy
 
 
@@ -76,7 +78,11 @@ class WorkingFx:
 
 
 def make_df(n: int = 30) -> pd.DataFrame:
-    idx = pd.date_range("2026-07-19 12:00", periods=n, freq="5min", tz="UTC")
+    # Ends at "now", not a fixed historical date -- the engine's own
+    # staleness gate (MAX_FRESH_ENTRY_BAR_AGE_SEC) would otherwise treat
+    # every fixture bar as too old to trade on and shadow it instead,
+    # which isn't what these FX/shorting tests are exercising.
+    idx = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=n, freq="5min")
     return pd.DataFrame(
         {"open": [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
          "close": [100.0] * n, "volume": [1000] * n},
@@ -142,6 +148,135 @@ def test_crypto_short_signal_is_skipped_not_ordered():
     # with the "why idle" gate explaining the skip
     assert engine.latest_signals[symbol]["signal"] == "SHORT"
     assert engine.latest_signals[symbol]["gate"] == "short unsupported (crypto)"
+
+
+def make_stale_df(n: int = 30, age_min: float = 20.0) -> pd.DataFrame:
+    idx = pd.date_range(
+        end=pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=age_min), periods=n, freq="5min"
+    )
+    return pd.DataFrame(
+        {"open": [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
+         "close": [100.0] * n, "volume": [1000] * n},
+        index=idx,
+    )
+
+
+def test_stale_bar_shadows_instead_of_placing_a_real_order(tmp_path):
+    """The core of the delayed-data mode: a signal computed off a bar
+    running well behind wall-clock time must not become a real order --
+    the real fill could already be at a very different price by the time
+    it reaches the exchange. Tracked as a shadow trade instead."""
+    engine, symbol = make_engine(Signal.LONG)
+    engine.base_currency = "USD"
+    engine.bars = FakeBars(make_stale_df(age_min=20.0))
+    engine.delayed_shadow = ShadowTradeTracker(tmp_path / "delayed.jsonl", max_hold_min=240)
+
+    run(engine._process_symbol(symbol, 100_000.0, 0, False, False))
+
+    assert engine.orders.placed == []
+    assert engine.delayed_shadow.has_open(symbol)
+    trade = engine.delayed_shadow.open_trades[symbol]
+    assert trade.direction == "LONG"
+    assert trade.entry_price == 100.0
+    assert "shadow only" in engine.latest_signals[symbol]["gate"]
+    # the bar is still consumed, same as any other acted-on signal -- this
+    # doesn't loop retrying the same bar forever
+    assert engine._last_bar_start[symbol] == engine.bars.dataframe(symbol).index[-1]
+
+
+def test_stale_bar_does_not_stack_a_second_shadow_trade(tmp_path):
+    engine, symbol = make_engine(Signal.LONG)
+    engine.base_currency = "USD"
+    engine.bars = FakeBars(make_stale_df(age_min=20.0))
+    engine.delayed_shadow = ShadowTradeTracker(tmp_path / "delayed.jsonl", max_hold_min=240)
+    engine.delayed_shadow.open(
+        symbol, "LONG", 99.0, 98.0, 101.0, headline="x", confidence=0.0, rationale="x"
+    )
+
+    run(engine._process_symbol(symbol, 100_000.0, 0, False, False))
+
+    assert engine.orders.placed == []
+    assert engine.delayed_shadow.open_trades[symbol].entry_price == 99.0  # unchanged
+
+
+def test_fresh_bar_places_a_real_order_not_a_shadow(tmp_path):
+    """The boundary case: a bar just under the staleness cutoff must still
+    go through the normal real-order path, unaffected by this gate."""
+    engine, symbol = make_engine(Signal.LONG)
+    engine.base_currency = "USD"
+    engine.bars = FakeBars(make_stale_df(age_min=1.0))
+    engine.delayed_shadow = ShadowTradeTracker(tmp_path / "delayed.jsonl", max_hold_min=240)
+
+    run(engine._process_symbol(symbol, 100_000.0, 0, False, False))
+
+    assert len(engine.orders.placed) == 1
+    assert not engine.delayed_shadow.open_trades
+
+
+class FakeSession:
+    def __init__(self, is_open: bool = True, should_flatten: bool = False):
+        self._is_open = is_open
+        self._should_flatten = should_flatten
+
+    def is_open(self) -> bool:
+        return self._is_open
+
+    def should_flatten(self) -> bool:
+        return self._should_flatten
+
+
+def test_update_delayed_shadow_trades_closes_on_target_hit(tmp_path):
+    engine, symbol = make_engine(Signal.LONG)
+    engine.delayed_shadow = ShadowTradeTracker(tmp_path / "delayed.jsonl", max_hold_min=240)
+    engine.delayed_shadow.open(
+        symbol, "LONG", 100.0, 98.0, 102.0, headline="x", confidence=0.0, rationale="x"
+    )
+    spec = engine.spec_by_symbol[symbol]
+    engine.market_sessions[spec.market] = FakeSession(is_open=True)
+    df = make_stale_df(age_min=20.0)
+    df["close"] = 103.0  # above target
+    engine.bars = FakeBars(df)
+
+    engine._update_delayed_shadow_trades()
+
+    assert not engine.delayed_shadow.has_open(symbol)
+    closed = json.loads((tmp_path / "delayed.jsonl").read_text().strip())
+    assert closed["status"] == "WIN"
+
+
+def test_update_delayed_shadow_trades_flattens_at_session_close(tmp_path):
+    engine, symbol = make_engine(Signal.LONG)
+    engine.delayed_shadow = ShadowTradeTracker(tmp_path / "delayed.jsonl", max_hold_min=240)
+    engine.delayed_shadow.open(
+        symbol, "LONG", 100.0, 98.0, 102.0, headline="x", confidence=0.0, rationale="x"
+    )
+    spec = engine.spec_by_symbol[symbol]
+    engine.market_sessions[spec.market] = FakeSession(is_open=True, should_flatten=True)
+    engine.bars = FakeBars(make_stale_df(age_min=20.0))  # close=100, no target/stop hit
+
+    engine._update_delayed_shadow_trades()
+
+    assert not engine.delayed_shadow.has_open(symbol)  # force-closed, not left riding
+    closed = json.loads((tmp_path / "delayed.jsonl").read_text().strip())
+    assert closed["status"] == "FLATTENED"
+
+
+def test_update_delayed_shadow_trades_skips_a_closed_market(tmp_path):
+    """Mirrors NewsMonitor's own reasoning: max-hold timeout is wall-clock
+    based, so updating against a market-closed (hours-stale) price could
+    fabricate a TIMEOUT close using a price nothing actually traded at."""
+    engine, symbol = make_engine(Signal.LONG)
+    engine.delayed_shadow = ShadowTradeTracker(tmp_path / "delayed.jsonl", max_hold_min=240)
+    engine.delayed_shadow.open(
+        symbol, "LONG", 100.0, 98.0, 102.0, headline="x", confidence=0.0, rationale="x"
+    )
+    spec = engine.spec_by_symbol[symbol]
+    engine.market_sessions[spec.market] = FakeSession(is_open=False)
+    engine.bars = FakeBars(make_stale_df(age_min=20.0))
+
+    engine._update_delayed_shadow_trades()
+
+    assert engine.delayed_shadow.has_open(symbol)  # untouched
 
 
 class FakeBarsNoData:

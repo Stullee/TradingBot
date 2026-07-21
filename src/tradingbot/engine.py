@@ -28,6 +28,7 @@ from tradingbot.fx import FxConverter
 from tradingbot.market_hours import MarketSession
 from tradingbot.markets import BUILTIN_MARKETS, build_session
 from tradingbot.news.monitor import NewsMonitor
+from tradingbot.news.shadow_trade import ShadowTradeTracker
 from tradingbot.risk.manager import RiskManager
 from tradingbot.status import gather_shadow_trading_status
 from tradingbot.strategy.base import Signal, Strategy
@@ -54,6 +55,17 @@ PROTECTION_CHECK_SEC = 60
 # hiccups that silently stop delivering updates (confirmed live: no error
 # logged, bars frozen 35+ minutes during regular market hours) should.
 STALE_BAR_MIN_THRESHOLD_SEC = 600
+# A signal computed off a bar this old (or older) drives a shadow trade
+# instead of a real order -- see _process_symbol. Confirmed live: a paper
+# account's US data ran a stable ~20-25 min behind all session (not
+# stalled -- bars kept arriving, just old, so STALE_BAR_MIN_THRESHOLD_SEC's
+# resubscribe logic never helped). Trading for real off a decision price
+# that stale is dangerous, not just "worse odds": the real order fills at
+# whatever the *current* price actually is, which can already be well past
+# the stop or target computed from the stale one -- exactly the entry-
+# slippage mechanism that turned one bad BMW fill into a -2.71R loss
+# (there measured in seconds of lag, not minutes).
+MAX_FRESH_ENTRY_BAR_AGE_SEC = 600
 # Minimum gap between resubscribe attempts for the *same* symbol. A
 # resubscribe is a real reqHistoricalDataAsync call, subject to IB's
 # historical-data pacing limit (~60 requests per rolling 10-minute window
@@ -129,6 +141,15 @@ class TradingEngine:
         self.contracts: dict[str, Contract] = {}
         self.contract_meta: dict[str, ContractMeta] = {}
         self.journal = TradeJournal(Path(settings.log_dir) / "trades.jsonl")
+        # Same generic tracker the news monitor uses for its shadow trades
+        # (see news/shadow_trade.py) -- reused here for signals that fire on
+        # a bar too stale to trust for a real order (MAX_FRESH_ENTRY_BAR_AGE_SEC).
+        # A separate file/instance so an overlapping news- and data-driven
+        # shadow trade on the same symbol never clobber each other.
+        self.delayed_shadow = ShadowTradeTracker(
+            Path(settings.log_dir) / "delayed_data_shadow_trades.jsonl",
+            max_hold_min=settings.news_max_hold_min,
+        )
         self.alerts = AlertSender(settings.alert_webhook_url)
         self.advisor: TradingAdvisor | None = None
         if settings.enable_ai_advisor:
@@ -487,6 +508,8 @@ class TradingEngine:
         for market_name, session in self.market_sessions.items():
             await self._tick_market(market_name, session, equity, open_position_count)
 
+        self._update_delayed_shadow_trades()
+
         if self.advisor is not None and self.advisor.due:
             report = await self.advisor.maybe_run(self._advisor_snapshot(equity))
             if report is not None and report.get("health") == "CRITICAL":
@@ -527,6 +550,28 @@ class TradingEngine:
             await self._process_symbol(
                 symbol, equity, open_position_count, entry_gate, outside_rth
             )
+
+    def _update_delayed_shadow_trades(self) -> None:
+        """Mirrors NewsMonitor._update_open_shadow_trades for shadow trades
+        opened because the driving bar was too stale to trust for a real
+        order (see MAX_FRESH_ENTRY_BAR_AGE_SEC) -- same stop/target/timeout
+        tracking, and the same no-overnight-risk discipline of flattening
+        at the market's close instead of carrying a hypothetical position
+        indefinitely. Uses the same (however stale) bar close the entry
+        itself was computed from -- it's the only price this bot has for
+        the symbol right now."""
+        for symbol in list(self.delayed_shadow.open_trades):
+            spec = self.spec_by_symbol.get(symbol)
+            session = self.market_sessions.get(spec.market) if spec else None
+            df = self.bars.dataframe(symbol)
+            price = float(df["close"].iloc[-1]) if df is not None and not df.empty else None
+
+            if session is not None and price is not None and session.should_flatten():
+                self.delayed_shadow.flatten(symbol, price)
+                continue
+            if session is None or price is None or not session.is_open():
+                continue
+            self.delayed_shadow.update(symbol, price)
 
     async def _check_stale_bars(self) -> None:
         """Live (keepUpToDate=True) bar streams can silently stop delivering
@@ -825,6 +870,7 @@ class TradingEngine:
         log_dir = Path(self.settings.log_dir)
         live_stats, recent_trades = summarize_live_trades(log_dir / "trades.jsonl")
         shadow = gather_shadow_trading_status(log_dir / "shadow_trades.jsonl")
+        delayed_shadow = gather_shadow_trading_status(log_dir / "delayed_data_shadow_trades.jsonl")
         positions = [
             {"symbol": p.contract.symbol, "qty": p.position, "avg_cost": p.avgCost}
             for p in self.broker.ib.positions()
@@ -845,6 +891,12 @@ class TradingEngine:
             "live_trades": asdict(live_stats),
             "recent_round_trips": recent_trades[-5:],
             "shadow_trading": asdict(shadow),
+            # Signals that fired on data too stale to trust for a real
+            # order (see MAX_FRESH_ENTRY_BAR_AGE_SEC) -- lets the advisor
+            # tell "the strategy isn't finding anything" apart from "the
+            # strategy is finding things but the feed is too delayed to
+            # act on them safely."
+            "delayed_data_shadow_trading": asdict(delayed_shadow),
             "open_positions": positions,
             "config": {
                 "strategy": self.settings.strategy,
@@ -1005,6 +1057,29 @@ class TradingEngine:
             stop_price = entry_price + stop_dist
             target_price = entry_price - target_dist
             action = "SELL"
+
+        bar_age_sec = (datetime.now(timezone.utc) - latest_bar_start).total_seconds()
+        if bar_age_sec >= MAX_FRESH_ENTRY_BAR_AGE_SEC:
+            # Too stale to trust for a real fill (see MAX_FRESH_ENTRY_BAR_AGE_SEC)
+            # -- track what the signal would have done instead of acting on it.
+            if not self.delayed_shadow.has_open(symbol):
+                age_min = bar_age_sec / 60
+                self.delayed_shadow.open(
+                    symbol,
+                    signal.value,
+                    entry_price,
+                    stop_price,
+                    target_price,
+                    headline=f"{self.settings.strategy} signal on a {age_min:.0f} min old bar",
+                    confidence=0.0,
+                    rationale=(
+                        f"Bar data is running {age_min:.0f} min behind wall clock -- "
+                        "shadowed instead of placing a real order, since the real fill "
+                        "price could already differ substantially from this one."
+                    ),
+                )
+            self._set_gate(symbol, f"shadow only (data {bar_age_sec / 60:.0f} min old)")
+            return
 
         try:
             equity_local = (

@@ -60,6 +60,15 @@ def seed_logs(log_dir: Path) -> None:
             {"symbol": "AAPL", "assessed_at": "2026-07-19T14:05:00+00:00"},  # excluded
         ],
     )
+    write_jsonl(
+        log_dir / "delayed_data_shadow_trades.jsonl",
+        [
+            {"status": "WIN", "closed_at": "2026-07-20T18:00:00+00:00"},
+            {"status": "LOSS", "closed_at": "2026-07-20T19:00:00+00:00"},
+            {"status": "LOSS", "closed_at": "2026-07-20T20:00:00+00:00"},
+            {"status": "WIN", "closed_at": "2026-07-19T18:00:00+00:00"},  # excluded
+        ],
+    )
 
 
 def test_build_summary_filters_to_the_requested_day(tmp_path):
@@ -82,6 +91,7 @@ def test_build_summary_filters_to_the_requested_day(tmp_path):
     assert s["avg_entry_slippage_bps"] == 35.0
     assert s["day_change_pct"] == round((10_412 - 10_444) / 10_444 * 100, 3)
     assert s["shadow_closed"] == 2 and s["shadow_wins"] == 1
+    assert s["delayed_data_shadow_closed"] == 3 and s["delayed_data_shadow_wins"] == 1
     assert s["news_batches_assessed"] == 1
 
 
@@ -97,6 +107,7 @@ def test_text_and_alert_renderings_contain_the_key_figures(tmp_path):
     assert "+26.00 USD" in text and "-21.00 EUR" in text
     assert "NVDA +0.9R" in text
     assert "KILL SWITCH ACTIVE: daily" in text
+    assert "Delayed-data shadow trades closed: 3 (1 wins)" in text
     alert = format_eod_alert(s)
     assert "2026-07-20" in alert and "2 trades" in alert and "KILL SWITCH" in alert
 

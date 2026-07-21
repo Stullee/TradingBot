@@ -227,6 +227,31 @@ had new articles...` line — that's logged every poll regardless of
 whether anything was found, so silence there (not just silence in
 `[NEWS]` lines) is the real signal something's actually stuck.
 
+## Delayed-data shadow-trading
+
+Every strategy signal is computed off the most recent bar the bot has, but
+if that bar is running `MAX_FRESH_ENTRY_BAR_AGE_SEC` (10 minutes) or more
+behind wall-clock time — a systematically delayed market data feed, not a
+brief stall — placing a real order off it is genuinely dangerous, not just
+lower-odds: the order fills at whatever the *current* price actually is,
+which can already be well past the stop or target computed from the stale
+one. Confirmed live: a paper account with US market data running a stable
+~20–25 minute delay all session, every symbol, all day.
+
+When this happens the bot **never places a real order for that signal** —
+it logs a shadow trade instead (same mechanism as the news shadow-trader
+above, same ATR stop/target sizing, its own file so the two don't mix),
+to `/config/tradingbot_logs/delayed_data_shadow_trades.jsonl`. This is
+also visible in the end-of-day summary and the AI advisor's snapshot
+(`delayed_data_shadow_trading`), so a systematically delayed feed shows up
+as "here's what the strategy would have done" rather than either silent
+inactivity or the entry-slippage risk of trading through it blind.
+
+If you see this firing regularly, it means the account's market data
+entitlements need attention (IB Client Portal → Market Data Subscriptions)
+— this is a data problem to fix at the source, not something to tune away
+in the bot.
+
 ## Status report
 
 `python addon_report_entrypoint.py` (same `docker exec` pattern as the

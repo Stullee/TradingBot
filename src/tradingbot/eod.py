@@ -2,10 +2,11 @@
 "what happened today and was it right" without grepping logs.
 
 Sources (all already persisted by the live engine):
-  - logs/trades.jsonl          real round trips + fills (net P&L, R, costs)
-  - logs/shadow_trades.jsonl   news shadow-trade outcomes
-  - logs/news_analysis.jsonl   news batches assessed
-  - risk state                 day/week baselines + kill switches (live only)
+  - logs/trades.jsonl                      real round trips + fills (net P&L, R, costs)
+  - logs/shadow_trades.jsonl                news shadow-trade outcomes
+  - logs/delayed_data_shadow_trades.jsonl   signals shadowed for stale data (see engine.py)
+  - logs/news_analysis.jsonl                news batches assessed
+  - risk state                              day/week baselines + kill switches (live only)
 
 The live engine emits one automatically at the UTC day rollover (23:55 UTC
 crypto flatten happens first, so the day is complete), appends it to
@@ -97,6 +98,15 @@ def build_eod_summary(
         if _on_day(t.get("closed_at"), day)
     ]
     shadow_wins = sum(1 for t in shadow_closed if t.get("status") == "WIN")
+    # Signals that fired on a bar too stale to trust for a real order (see
+    # engine.MAX_FRESH_ENTRY_BAR_AGE_SEC) -- tracked the same way as news
+    # shadow trades, just from a different log file so the two don't mix.
+    delayed_shadow_closed = [
+        t
+        for t in _read_jsonl(log_dir / "delayed_data_shadow_trades.jsonl")
+        if _on_day(t.get("closed_at"), day)
+    ]
+    delayed_shadow_wins = sum(1 for t in delayed_shadow_closed if t.get("status") == "WIN")
     news_batches = [
         r
         for r in _read_jsonl(log_dir / "news_analysis.jsonl")
@@ -136,6 +146,8 @@ def build_eod_summary(
         "weekly_kill_switch": weekly_kill_switch,
         "shadow_closed": len(shadow_closed),
         "shadow_wins": shadow_wins,
+        "delayed_data_shadow_closed": len(delayed_shadow_closed),
+        "delayed_data_shadow_wins": delayed_shadow_wins,
         "news_batches_assessed": len(news_batches),
         "advisor_assessment": advisor_assessment,
     }
@@ -200,6 +212,12 @@ def format_eod_text(s: dict) -> str:
         + (f" ({s['shadow_wins']} wins)" if s["shadow_closed"] else "")
         + f" | news batches assessed: {s['news_batches_assessed']}"
     )
+    if s.get("delayed_data_shadow_closed"):
+        lines.append(
+            f"Delayed-data shadow trades closed: {s['delayed_data_shadow_closed']} "
+            f"({s['delayed_data_shadow_wins']} wins) -- signals the feed was too "
+            "stale to act on for real"
+        )
     if s.get("advisor_assessment"):
         lines.append(f"Advisor: {s['advisor_assessment'][:400]}")
     return "\n".join(lines)

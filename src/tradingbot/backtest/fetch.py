@@ -25,5 +25,13 @@ async def fetch_history(
         useRTH=use_rth,
         formatDate=2,
         keepUpToDate=False,
+        # Default is 60s. A 60-day/5-min pull is a heavy query for IB's
+        # history farm -- during active US market hours it routinely takes
+        # longer than that and the client cancels it (Error 162: "API
+        # historical data query cancelled") even though IB would have
+        # delivered the data. 0 disables the client-side timeout entirely
+        # (IB's own farm-side limits still apply), which is what backtests
+        # -- unlike live trading -- can afford to wait on.
+        timeout=0,
     )
     return bars_to_dataframe(bars)
